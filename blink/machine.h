@@ -697,6 +697,7 @@ void OpPmovmskbGdqpNqUdq(P);
 void OpUnpcklpsd(P);
 void OpUnpckhpsd(P);
 void OpPextrwGdqpUdqIb(P);
+void OpPextrdEdqpVdqIb(P);
 void OpPinsrwVdqEwIb(P);
 void OpPinsrbVdqEdIb(P);
 void OpPinsrdVdqEdqpIb(P);

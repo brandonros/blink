@@ -125,6 +125,25 @@ void OpPextrwGdqpUdqIb(P) {
   Put64(RegRexrReg(m, rde), Get16(XmmRexbRm(m, rde) + i * 2));
 }
 
+void OpPextrdEdqpVdqIb(P) {
+  unsigned size, index;
+  u64 value;
+  u8 *source, *destination;
+  if (!Osz(rde) || Rep(rde)) return OpUd(A);
+  size = Rexw(rde) ? 8 : 4;
+  index = uimm0 & (Rexw(rde) ? 1 : 3);
+  source = XmmRexrReg(m, rde) + index * size;
+  value = Rexw(rde) ? Get64(source) : Get32(source);
+  destination = GetModrmRegisterWordPointerWrite(A, size);
+  IGNORE_RACES_START();
+  if (Rexw(rde) || IsModrmRegister(rde)) {
+    Put64(destination, value);
+  } else {
+    Put32(destination, value);
+  }
+  IGNORE_RACES_END();
+}
+
 void OpPinsrwVdqEwIb(P) {
   u8 i;
   i = uimm0;
