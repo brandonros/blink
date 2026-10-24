@@ -118,3 +118,43 @@ o/blink/blink -jm -C /path/to/rootfs /tmp/remap-probe
 With the trixie indexes already downloaded, `apt-cache gencaches` now exits 0
 using its default cache size, without the Cache-Start override. Its syscall
 trace shows successful growth both in place and to new addresses.
+
+## Package installation and scripts
+
+Debian's `fakeroot`/`libfakeroot` 1.37.1.1-1 packages were downloaded with APT
+and their data archives extracted into the disposable root. `fakeroot-tcp`
+works through Blink: `id` reports root; a guest `chown 1000:1000` is visible
+through guest stat and saved in its `-s` metadata file, while host ownership
+remains the macOS account's. This is an external userspace component, not
+native guest credentials or permission enforcement in Blink.
+
+Running APT through it reached dpkg unpacking and exposed two further defects:
+
+- `VfsUtime` initialized its result to -1 and only changed it while following
+  symlinks. With AT_SYMLINK_NOFOLLOW it never called the backend and returned
+  stale errno. Initialize the result to 0 instead. The new
+  `test/func/utimens_nofollow_test.c` fails at the regular-file update before
+  the fix (exit 3) and passes in both modes afterward. It also verifies that
+  updating a symlink does not update its target.
+- Python's maintainer script starts with `#! /bin/sh`. The old shebang parser
+  treated that leading space as an empty interpreter name and fell back to
+  host execution. It now accepts leading spaces/tabs, separates an optional
+  argument, and trims trailing spaces/tabs as Linux does. The new
+  `test/func/shebang_space_test.c` fails on the spaced form before the fix
+  (exit 11), then passes canonical, spaced, and tabbed forms with optional
+  arguments in both modes. It checks that the interpreter reports Linux.
+
+## Node event loop checkpoint
+
+The AMD64 `node:22-bookworm-slim` manifest
+`sha256:ea11b74b986d520137cdef9a5346e447a00f275ecc4abc0055b7151226231e09`
+contains five layers. `node --version` reports v22.23.4 under Blink, but
+`node -e` aborts in libuv loop initialization after epoll_create1 returns
+ENOSYS. Blink's epoll handlers are conditional on HAVE_EPOLL_PWAIT1, which is
+absent on this macOS build.
+
+`tool/epoll_probe.c` isolates the prerequisite without Node. Compile it as a
+static AMD64 ELF and run inside the rootfs in each mode; both currently print
+`epoll_create1: Function not implemented` and exit 1. The later checks cover
+CLOEXEC, socket readiness, event data, and removal, for validating a future
+implementation. No epoll compatibility patch is included yet.
