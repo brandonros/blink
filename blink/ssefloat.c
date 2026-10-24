@@ -122,7 +122,7 @@ void OpPextrwGdqpUdqIb(P) {
   u8 i;
   i = uimm0;
   i &= Osz(rde) ? 7 : 3;
-  Put16(RegRexrReg(m, rde), Get16(XmmRexbRm(m, rde) + i * 2));
+  Put64(RegRexrReg(m, rde), Get16(XmmRexbRm(m, rde) + i * 2));
 }
 
 void OpPinsrwVdqEwIb(P) {
