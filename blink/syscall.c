@@ -247,7 +247,7 @@ bool DeliverSignalRecursively(struct Machine *m, int sig) {
   if ((issigsuspend = m->issigsuspend)) {
     m->issigsuspend = false;
     unassert(!sigemptyset(&unblock));
-    unassert(!pthread_sigmask(SIG_BLOCK, &unblock, &oldmask));
+    unassert(!pthread_sigmask(SIG_SETMASK, &unblock, &oldmask));
   }
   m->restored = false;
   m->insyscall = false;
