@@ -552,6 +552,7 @@ const char *DescribeMopcode(int code) {
     XLAT(0x22a, "OpMovntdqaVdqMdq");
     XLAT(0x240, "OpSsePmulld");
     XLAT(0x30f, "OpSsePalignr");
+    XLAT(0x322, "OpPinsrdVdqEdqpIb");
     XLAT(0x344, "OpSsePclmulqdq");
     default:
       return "UNKNOWN";

@@ -698,6 +698,7 @@ void OpUnpcklpsd(P);
 void OpUnpckhpsd(P);
 void OpPextrwGdqpUdqIb(P);
 void OpPinsrwVdqEwIb(P);
+void OpPinsrdVdqEdqpIb(P);
 void OpShuffle(P);
 void OpShufpsd(P);
 void OpSqrtpsd(P);

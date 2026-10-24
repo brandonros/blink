@@ -135,6 +135,17 @@ void OpPinsrwVdqEwIb(P) {
   IGNORE_RACES_END();
 }
 
+void OpPinsrdVdqEdqpIb(P) {
+  unsigned size, index;
+  if (!Osz(rde) || Rep(rde)) return OpUd(A);
+  size = Rexw(rde) ? 8 : 4;
+  index = uimm0 & (Rexw(rde) ? 1 : 3);
+  IGNORE_RACES_START();
+  memcpy(XmmRexrReg(m, rde) + index * size,
+         GetModrmRegisterWordPointerRead(A, size), size);
+  IGNORE_RACES_END();
+}
+
 void OpShuffle(P) {
   i16 q16[4];
   void *kernel;
