@@ -1246,6 +1246,9 @@ int VfsStat(int dirfd, const char *name, struct stat *st, int flags) {
   if (name == NULL || st == NULL) {
     return efault();
   }
+  if (!*name) {
+    return enoent();
+  }
   if (VfsHandleDirfdName(dirfd, name, &dir, newname) == -1) {
     return -1;
   }
