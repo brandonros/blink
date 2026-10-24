@@ -4476,6 +4476,9 @@ static i32 Select(struct Machine *m,          //
   struct timespec now, wait, remain, deadline = {0};
   struct Fd *fd;
   int (*poll_impl)(struct pollfd *, nfds_t, int);
+  struct pollfd waitfds[FD_SETSIZE];
+  int nwait;
+  bool canwait;
   if (timeoutp) {
     deadline = AddTime(GetTime(), *timeoutp);
   }
@@ -4519,6 +4522,8 @@ static i32 Select(struct Machine *m,          //
       break;
     }
     rc = 0;
+    nwait = 0;
+    canwait = true;
     for (fildes = 0; fildes < nfds; ++fildes) {
       if (!FD_ISSET(fildes, &readfds) && !FD_ISSET(fildes, &writefds) &&
           !FD_ISSET(fildes, &exceptfds)) {
@@ -4546,12 +4551,18 @@ static i32 Select(struct Machine *m,          //
           case 0:
             break;
           case 1:
-            if (FD_ISSET(fildes, &readfds) && (hfds[0].revents & POLLIN)) {
+            if (hfds[0].revents & POLLNVAL) {
+              rc = ebadf();
+              goto BreakLoop;
+            }
+            if (FD_ISSET(fildes, &readfds) &&
+                (hfds[0].revents & (POLLIN | POLLHUP | POLLERR))) {
               ++rc;
               FD_SET(fildes, &readyreadfds);
               FD_CLR(fildes, &readfds);
             }
-            if (FD_ISSET(fildes, &writefds) && (hfds[0].revents & POLLOUT)) {
+            if (FD_ISSET(fildes, &writefds) &&
+                (hfds[0].revents & (POLLOUT | POLLERR))) {
               ++rc;
               FD_SET(fildes, &readywritefds);
               FD_CLR(fildes, &writefds);
@@ -4568,6 +4579,11 @@ static i32 Select(struct Machine *m,          //
             }
             rc = -1;
             goto BreakLoop;
+        }
+        if (poll_impl == VfsPoll) {
+          waitfds[nwait++] = hfds[0];
+        } else {
+          canwait = false;
         }
       } else {
         rc = ebadf();
@@ -4587,7 +4603,17 @@ static i32 Select(struct Machine *m,          //
     } else {
       wait = FromMilliseconds(kPollingMs);
     }
-    nanosleep(&wait, 0);
+    if (canwait && nwait) {
+      // Keep bounded waits for emulated thread signals, but wake immediately
+      // when any descriptor becomes ready instead of imposing 50ms per RPC.
+      if (VfsPoll(waitfds, nwait, ConvertTimeToInt(ToMilliseconds(wait))) == -1 &&
+          errno != EINTR) {
+        rc = -1;
+        break;
+      }
+    } else {
+      nanosleep(&wait, 0);
+    }
   }
   if (sigmaskp_guest) {
     m->sigmask = oldmask_guest;

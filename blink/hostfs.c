@@ -1094,18 +1094,25 @@ cleananddie:
 
 int HostfsPoll(struct VfsInfo **infos, struct pollfd *fds, nfds_t nfds,
                int timeout) {
-  int rc;
-  int oldfd;
+  int rc, err;
+  nfds_t i;
+  struct pollfd *hostfds;
   VFS_LOGF("HostfsPoll(%p, %lli, %i)", infos, (long long)nfds, timeout);
   if (infos == NULL) {
     return efault();
   }
-  // Same reason as in VfsPoll above
-  unassert(nfds == 1);
-  oldfd = fds->fd;
-  fds->fd = ((struct HostfsInfo *)infos[0]->data)->filefd;
-  rc = poll(fds, nfds, timeout);
-  fds->fd = oldfd;
+  if (!(hostfds = calloc(nfds ? nfds : 1, sizeof(*hostfds)))) return enomem();
+  for (i = 0; i < nfds; ++i) {
+    hostfds[i] = fds[i];
+    if (fds[i].fd >= 0)
+      hostfds[i].fd = ((struct HostfsInfo *)infos[i]->data)->filefd;
+  }
+  rc = poll(hostfds, nfds, timeout);
+  err = errno;
+  if (rc >= 0)
+    for (i = 0; i < nfds; ++i) fds[i].revents = hostfds[i].revents;
+  free(hostfds);
+  errno = err;
   return rc;
 }
 

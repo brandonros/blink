@@ -1874,21 +1874,28 @@ int VfsDup3(int fd, int newfd, int flags) {
 #endif
 
 int VfsPoll(struct pollfd *fds, nfds_t nfds, int timeout) {
-  struct VfsInfo *info;
-  int ret;
+  struct VfsInfo **infos;
+  nfds_t i;
+  int ret = -1, err;
   VFS_LOGF("VfsPoll(%p, %lld, %d)", fds, (long long)nfds, timeout);
-  // Currently, blink only uses poll with nfds = 1 and timeout = 0
-  unassert(nfds == 1);
-  unassert(timeout == 0);
-  if (VfsGetFd(fds[0].fd, &info) == -1) {
-    return -1;
+  if (!(infos = calloc(nfds ? nfds : 1, sizeof(*infos)))) return enomem();
+  for (i = 0; i < nfds; ++i) {
+    if (fds[i].fd < 0) continue;
+    if (VfsGetFd(fds[i].fd, &infos[i]) == -1) goto Done;
+    // All currently pollable VFS descriptors use HostfsPoll. Hold references
+    // until the native wait finishes so a concurrent close cannot reuse them.
+    if (infos[i]->device->ops->Poll != HostfsPoll) {
+      eperm();
+      goto Done;
+    }
   }
-  if (info->device->ops->Poll) {
-    ret = info->device->ops->Poll(&info, fds, 1, timeout);
-  } else {
-    ret = eperm();
-  }
-  unassert(!VfsFreeInfo(info));
+  ret = HostfsPoll(infos, fds, nfds, timeout);
+Done:
+  err = errno;
+  for (i = 0; i < nfds; ++i)
+    if (infos[i]) unassert(!VfsFreeInfo(infos[i]));
+  free(infos);
+  errno = err;
   return ret;
 }
 
