@@ -107,7 +107,7 @@ void OpUnpckhpsd(P) {
   b = GetModrmRegisterXmmPointerRead16(A);
   IGNORE_RACES_START();
   if (Osz(rde)) {
-    memcpy(a + 0, b + 8, 8);
+    memcpy(a + 0, a + 8, 8);
     memcpy(a + 8, b + 8, 8);
   } else {
     memcpy(a + 4 * 0, a + 4 * 2, 4);
