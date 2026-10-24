@@ -687,6 +687,7 @@ static void ReleaseJitBlock(struct JitBlock *jb) {
   jb->committed = 0;
   jb->wasretired = false;
   jb->isprotected = false;
+  jb->isleased = false;
   dll_init(&jb->aged);
   LOCK(&g_jit.lock);
   dll_make_first(&g_jit.freeblocks, &jb->elem);
@@ -700,6 +701,7 @@ static void ReleaseJitBlock(struct JitBlock *jb) {
 // @assume jit->lock
 static void RetireJitBlock(struct Jit *jit, struct JitBlock *jb) {
   JIT_LOGF("retiring jit block %p", jb);
+  unassert(!jb->isleased);
   unassert(!jb->isprotected);
   unassert(dll_is_empty(jb->jumps));
   unassert(dll_is_empty(jb->staged));
@@ -1245,7 +1247,7 @@ static void ForceJitBlocksToRetire(struct Jit *jit) {
   for (e = dll_first(jit->agedblocks); e; e = e2) {
     e2 = dll_next(jit->agedblocks, e);
     jb = AGEDBLOCK_CONTAINER(e);
-    if (!jb->isprotected) {
+    if (!jb->isleased && !jb->isprotected) {
       JIT_LOGF("forcing jit block %p to retire", jb);
       RetireJitBlock(jit, jb);
     }
@@ -1348,6 +1350,7 @@ struct JitBlock *StartJit(struct Jit *jit, i64 opt_virt) {
       }
     }
     if (jb) {
+      jb->isleased = true;
       dll_make_first(&jb->freejumps, jit->freejumps);
       jit->freejumps = 0;
     }
@@ -1534,6 +1537,7 @@ int CommitJit_(struct Jit *jit, struct JitBlock *jb) {
 void ReinsertJitBlock_(struct Jit *jit, struct JitBlock *jb) {
   unassert(jb->start == jb->index);
   unassert(dll_is_empty(jb->jumps));
+  jb->isleased = false;
   if (jb->index < kJitBlockSize) {
     // there's still memory remaining; reinsert for immediate reuse.
     dll_make_first(&jit->blocks, &jb->elem);
