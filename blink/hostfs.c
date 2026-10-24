@@ -611,6 +611,15 @@ int HostfsOpen(struct VfsInfo *parent, const char *name, int flags, int mode,
     goto cleananddie;
   }
   (*output)->data = outputinfo;
+  // Opening "." creates a new descriptor for parent, not a child of it.
+  // Preserve the logical ancestry so successive openat(fd, "..") calls
+  // continue upwards, including after the previously visited child is removed.
+  if (!strcmp(name, ".")) {
+    name = parent->name;
+    unassert(!VfsAcquireInfo(parent->parent, &(*output)->parent));
+  } else {
+    unassert(!VfsAcquireInfo(parent, &(*output)->parent));
+  }
   (*output)->name = strdup(name);
   if ((*output)->name == NULL) {
     enomem();
@@ -623,7 +632,6 @@ int HostfsOpen(struct VfsInfo *parent, const char *name, int flags, int mode,
       HostfsHash(st.st_dev, (const char *)&st.st_ino, sizeof(st.st_ino));
   (*output)->mode = outputinfo->mode;
   (*output)->refcount = 1;
-  unassert(!VfsAcquireInfo(parent, &(*output)->parent));
   return 0;
 cleananddie:
   if (*output) {
