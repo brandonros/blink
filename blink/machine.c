@@ -2071,6 +2071,7 @@ nexgen32e_f GetOp(long op) {
     return kNexgen32e[op];
   } else {
     switch (op) {
+      XLAT(0x217, OpPtest);
       XLAT(0x21c, OpSsePabsb);
       XLAT(0x21d, OpSsePabsw);
       XLAT(0x21e, OpSsePabsd);

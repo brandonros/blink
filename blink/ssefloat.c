@@ -146,6 +146,26 @@ void OpPinsrdVdqEdqpIb(P) {
   IGNORE_RACES_END();
 }
 
+void OpPtest(P) {
+  u64 a[2], b[2];
+  u8 *p;
+  if (!Osz(rde) || Rep(rde)) return OpUd(A);
+  IGNORE_RACES_START();
+  p = XmmRexrReg(m, rde);
+  a[0] = Get64(p);
+  a[1] = Get64(p + 8);
+  p = GetModrmRegisterXmmPointerRead16(A);
+  b[0] = Get64(p);
+  b[1] = Get64(p + 8);
+  IGNORE_RACES_END();
+  m->flags = SetFlag(m->flags, FLAGS_ZF, !((a[0] & b[0]) | (a[1] & b[1])));
+  m->flags = SetFlag(m->flags, FLAGS_CF, !((~a[0] & b[0]) | (~a[1] & b[1])));
+  m->flags = SetFlag(m->flags, FLAGS_OF, false);
+  m->flags = SetFlag(m->flags, FLAGS_SF, false);
+  m->flags = SetFlag(m->flags, FLAGS_AF, false);
+  m->flags = SetFlag(m->flags, FLAGS_PF, false);
+}
+
 // Round IEEE binary32/binary64 encodings without changing the host FP mode.
 static u64 RoundIntegral(u64 bits, unsigned fracbits, unsigned expbits,
                          unsigned mode, bool daz, bool suppress,
