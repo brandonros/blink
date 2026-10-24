@@ -135,6 +135,14 @@ void OpPinsrwVdqEwIb(P) {
   IGNORE_RACES_END();
 }
 
+void OpPinsrbVdqEdIb(P) {
+  if (!Osz(rde) || Rep(rde)) return OpUd(A);
+  IGNORE_RACES_START();
+  // Register sources are the low byte of r32, never AH/CH/DH/BH.
+  XmmRexrReg(m, rde)[uimm0 & 15] = *GetModrmRegisterWordPointerRead(A, 1);
+  IGNORE_RACES_END();
+}
+
 void OpPinsrdVdqEdqpIb(P) {
   unsigned size, index;
   if (!Osz(rde) || Rep(rde)) return OpUd(A);
