@@ -43,5 +43,37 @@ and APT missing-package probe do not need network access.
 
 The tested base manifest was
 `sha256:4876fdea29cac1a33a3195f1eb1952feb1fca7dd6dd00be3e2f1879cf20d34d2`.
-DNS and SIGBUS remain unresolved; these are opt-in diagnostic tools, separate
-from the deterministic function-test suite.
+These are opt-in diagnostic tools, separate from the deterministic function-test
+suite.
+
+## Fork/JIT follow-up
+
+Temporary macOS ARM64 signal instrumentation located the host fault PC and fault
+address inside `g_code`, reached from `ExecuteInstruction` while calling an
+inherited compiled path immediately after guest clone/fork. That instrumentation
+is not part of the patch.
+
+The fork child now restores executable JIT access with `FixJitProtection`, using
+the existing Apple write-protection helper. A clean control build reproduced
+SIGBUS in 5/30 JIT APT probes and 0/30 interpreter probes. With the fix, all 30
+probes per mode passed with no SIGBUS. This is integration evidence for an
+intermittent failure, not proof against every possible SIGBUS. Use `--repeat 30` with
+the command above to repeat this integration check. Simple warmed-code fork
+smokes also pass before the fix, so they are not a regression reproducer.
+
+## Next Debian build barriers
+
+Setting guest `RES_OPTIONS=use-vc` enables glibc's TCP DNS path and permits APT
+index downloads. It does not implement UDP IP_RECVERR compatibility.
+
+After downloading the trixie indexes, `apt-cache gencaches` fails when growing
+its default cache. The syscall trace contains:
+
+```text
+mremap(0x2000011ec000, 0x1800000, 0x1900000, 0x1, 0) -> -ENOMEM
+```
+
+`SysMremap` currently returns ENOMEM unconditionally. The diagnostic command
+`apt-cache -o APT::Cache-Start=134217728 gencaches` succeeds with those indexes.
+Starting with a larger allocation bypasses this particular growth request; it
+does not add mremap support or establish package installation compatibility.

@@ -851,6 +851,13 @@ int EnableJit(struct Jit *jit) {
  * Fixes the memory protection for existing Just-In-Time code blocks.
  */
 int FixJitProtection(struct Jit *jit) {
+#if defined(__APPLE__) && defined(__aarch64__)
+  // A fork child must enter executable mode before calling inherited JIT code.
+  if (pthread_jit_write_protect_supported_np()) {
+    pthread_jit_write_protect_np_workaround(true);
+  }
+  return 0;
+#else
   int prot;
   struct Dll *e;
   LockJit(jit);
@@ -861,6 +868,7 @@ int FixJitProtection(struct Jit *jit) {
   }
   UnlockJit(jit);
   return 0;
+#endif
 }
 
 // @assume jit->lock

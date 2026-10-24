@@ -456,9 +456,8 @@ static int Fork(struct Machine *m, u64 flags, u64 stack, u64 ctid) {
     m->tid = m->system->pid = newpid;
     m->system->isfork = true;
     RemoveOtherThreads(m->system);
-#ifdef __CYGWIN__
-    // Cygwin doesn't seem to properly set the PROT_EXEC
-    // protection for JIT blocks after forking.
+#if defined(__CYGWIN__) || (defined(__APPLE__) && defined(__aarch64__))
+    // Restore executable access to inherited JIT code in the fork child.
     FixJitProtection(&m->system->jit);
 #endif
     if ((flags & (CLONE_CHILD_SETTID_LINUX | CLONE_CHILD_CLEARTID_LINUX)) &&
