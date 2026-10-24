@@ -1297,6 +1297,18 @@ const char *DisSpecMap3(struct XedDecodedInst *x, char *p) {
   switch (Opcode(x->op.rde)) {
     RCASE(0x0F, DisOpPqQqIbVdqWdqIb(x, p, "palignr"));
     RCASE(0xF0, "rorx %Gdqp Edqp Ib");
+    case 0x08:
+      if (!Osz(x->op.rde) || Rep(x->op.rde)) return "wut";
+      return "roundps %Vdq Wdq Ib";
+    case 0x09:
+      if (!Osz(x->op.rde) || Rep(x->op.rde)) return "wut";
+      return "roundpd %Vdq Wdq Ib";
+    case 0x0a:
+      if (!Osz(x->op.rde) || Rep(x->op.rde)) return "wut";
+      return "roundss %Vdq Wss Ib";
+    case 0x0b:
+      if (!Osz(x->op.rde) || Rep(x->op.rde)) return "wut";
+      return "roundsd %Vdq Wsd Ib";
     case 0x22:
       if (!Osz(x->op.rde) || Rep(x->op.rde)) return "wut";
       return Rexw(x->op.rde) ? "pinsrq %Vdq Eq Ib" : "pinsrd %Vdq Ed Ib";

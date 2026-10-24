@@ -146,6 +146,80 @@ void OpPinsrdVdqEdqpIb(P) {
   IGNORE_RACES_END();
 }
 
+// Round IEEE binary32/binary64 encodings without changing the host FP mode.
+static u64 RoundIntegral(u64 bits, unsigned fracbits, unsigned expbits,
+                         unsigned mode, bool daz, bool suppress,
+                         unsigned *exceptions) {
+  u64 sign, mag, fraction, expmask, exponent, bias, unit, tail, result;
+  int exponent2;
+  bool increment;
+  sign = bits & (1ull << (fracbits + expbits));
+  mag = bits ^ sign;
+  fraction = mag & ((1ull << fracbits) - 1);
+  expmask = (1u << expbits) - 1;
+  exponent = mag >> fracbits;
+  bias = expmask >> 1;
+  if (exponent == expmask) {
+    if (fraction && !(fraction & (1ull << (fracbits - 1)))) {
+      *exceptions |= kMxcsrIe;
+      bits |= 1ull << (fracbits - 1);
+    }
+    return bits;
+  }
+  if (!exponent && daz) return sign;
+  if (!mag || exponent >= bias + fracbits) return bits;
+  exponent2 = (int)exponent - (int)bias;
+  if (exponent2 < 0) {
+    increment = mode == 0 ? mag > ((bias - 1) << fracbits)
+                         : mode == 1 ? !!sign : mode == 2 ? !sign : false;
+    result = increment ? bias << fracbits : 0;
+  } else {
+    unit = 1ull << (fracbits - exponent2);
+    tail = mag & (unit - 1);
+    if (!tail) return bits;
+    result = mag & ~(unit - 1);
+    increment = mode == 0 ? tail > unit / 2 ||
+                               (tail == unit / 2 && (result & unit))
+                         : mode == 1 ? !!sign : mode == 2 ? !sign : false;
+    if (increment) result += unit;
+  }
+  if (!suppress) *exceptions |= kMxcsrPe;
+  return sign | result;
+}
+
+void OpRound(P) {
+  unsigned width, size, mode, i, exceptions = 0;
+  u8 source[16], result[16];
+  u64 bits;
+  if (!Osz(rde) || Rep(rde)) return OpUd(A);
+  width = (Opcode(rde) & 1) ? 8 : 4;
+  size = (Opcode(rde) & 2) ? width : 16;
+  mode = uimm0 & 4 ? (m->mxcsr >> 13) & 3 : uimm0 & 3;
+  IGNORE_RACES_START();
+  memcpy(source, GetModrmRegisterXmmPointerRead(A, size), size);
+  IGNORE_RACES_END();
+  for (i = 0; i < size; i += width) {
+    bits = width == 8 ? Get64(source + i) : Get32(source + i);
+    bits = RoundIntegral(bits, width == 8 ? 52 : 23, width == 8 ? 11 : 8,
+                         mode, !!(m->mxcsr & kMxcsrDaz), !!(uimm0 & 8),
+                         &exceptions);
+    if (width == 8) {
+      Put64(result + i, bits);
+    } else {
+      Put32(result + i, bits);
+    }
+  }
+  m->mxcsr |= exceptions & kMxcsrIe;
+  if ((exceptions & kMxcsrIe) && !(m->mxcsr & kMxcsrIm)) {
+    HaltMachine(m, kMachineSimdException);
+  }
+  m->mxcsr |= exceptions & kMxcsrPe;
+  if ((exceptions & kMxcsrPe) && !(m->mxcsr & kMxcsrPm)) {
+    HaltMachine(m, kMachineSimdException);
+  }
+  memcpy(XmmRexrReg(m, rde), result, size);
+}
+
 void OpPmovx(P) {
   static const u8 widths[6][2] = {{1, 2}, {1, 4}, {1, 8},
                                  {2, 4}, {2, 8}, {4, 8}};

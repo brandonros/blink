@@ -701,6 +701,7 @@ void OpPinsrwVdqEwIb(P);
 void OpPinsrdVdqEdqpIb(P);
 void OpPcmpstr(P);
 void OpPmovx(P);
+void OpRound(P);
 void OpShuffle(P);
 void OpShufpsd(P);
 void OpSqrtpsd(P);
