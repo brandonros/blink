@@ -670,6 +670,8 @@ int XlatSocketOptname(int level, int optname) {
 #endif
 #ifdef TCP_KEEPIDLE
         XLAT(TCP_KEEPIDLE_LINUX, TCP_KEEPIDLE);
+#elif defined(__APPLE__) && defined(TCP_KEEPALIVE)
+        XLAT(TCP_KEEPIDLE_LINUX, TCP_KEEPALIVE);
 #endif
 #ifdef TCP_KEEPINTVL
         XLAT(TCP_KEEPINTVL_LINUX, TCP_KEEPINTVL);
