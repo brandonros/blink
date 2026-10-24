@@ -2006,6 +2006,7 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
                             : GetXmmPtr);
         break;
 
+      case 'W':  // res0 = GetRegOrMemPointer(RexbRm), writable
       case 'P':  // res0 = GetRegOrMemPointer(RexbRm)
         if (IsModrmRegister(rde)) {
           Jitter(A,
@@ -2029,12 +2030,12 @@ static unsigned JitterImpl(P, const char *fmt, va_list va, unsigned k,
         } else {
           Jitter(A,
                  "L"      // load effective address
-                 "a3i"    // arg3 = false
+                 "a3i"    // arg3 = writable
                  "a2i"    // arg2 = bytes to read
                  "r0a1="  // arg1 = virtual address
                  "q"      // arg0 = machine
                  "c",     // res0 = call function (turn virtual into pointer)
-                 (u64)0, (u64)(1 << log2sz), ReserveAddress);
+                 (u64)(c == 'W'), (u64)(1 << log2sz), ReserveAddress);
         }
         break;
 
