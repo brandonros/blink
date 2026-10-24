@@ -698,6 +698,7 @@ void OpUnpcklpsd(P);
 void OpUnpckhpsd(P);
 void OpPextrwGdqpUdqIb(P);
 void OpPextrdEdqpVdqIb(P);
+void OpPextrbw(P);
 void OpExtractpsEdVpsIb(P);
 void OpPackusdw(P);
 void OpPcmpgtq(P);
