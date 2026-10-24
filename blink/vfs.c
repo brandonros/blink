@@ -1423,7 +1423,7 @@ int VfsUtime(int dirfd, const char *name, const struct timespec times[2],
              int flags) {
   struct VfsInfo *dir;
   char newname[VFS_NAME_MAX];
-  int ret = -1;
+  int ret = 0;
   VFS_LOGF("VfsUtime(%d, \"%s\", %p, %d)", dirfd, name, times, flags);
   if (name == NULL) {
     return efault();
