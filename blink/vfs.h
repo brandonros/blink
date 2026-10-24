@@ -51,6 +51,7 @@ struct VfsOps {
   int (*Finddir)(struct VfsInfo *, const char *, struct VfsInfo **);
   int (*Traverse)(struct VfsInfo **, const char **, struct VfsInfo *);
   ssize_t (*Readlink)(struct VfsInfo *, char **);
+  ssize_t (*Readfdlink)(struct VfsInfo *, char **);
   int (*Mkdir)(struct VfsInfo *, const char *, mode_t);
   int (*Mkfifo)(struct VfsInfo *, const char *, mode_t);
   int (*Open)(struct VfsInfo *, const char *, int, int, struct VfsInfo **);
@@ -291,6 +292,8 @@ int VfsAcquireDevice(struct VfsDevice *, struct VfsDevice **);
 int VfsFreeDevice(struct VfsDevice *);
 int VfsFreeInfo(struct VfsInfo *);
 int VfsAddFd(struct VfsInfo *);
+int VfsGetFd(int, struct VfsInfo **);
+int VfsNextFd(u64);
 int VfsFreeFd(int, struct VfsInfo **);
 int VfsSetFd(int, struct VfsInfo *);
 ssize_t VfsPathBuildFull(struct VfsInfo *, struct VfsInfo *, char **);

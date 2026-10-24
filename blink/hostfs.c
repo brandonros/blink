@@ -662,6 +662,52 @@ int HostfsStat(struct VfsInfo *parent, const char *name, struct stat *st,
   return ret;
 }
 
+/* Resolve current descriptor paths without relying on cached VFS names. */
+static ssize_t HostfsReadfdlink(struct VfsInfo *info, char **output) {
+#if defined(__APPLE__) && defined(F_GETPATH)
+  struct HostfsInfo *file = info->data;
+  struct HostfsDevice *device = info->device->data;
+  struct stat st, named;
+  bool removed;
+  char path[VFS_PATH_MAX], *root, *source;
+  const char *suffix, *deleted;
+  size_t len, rootlen, sourcelen;
+  if (file->filefd == -1) return ebadf();
+  if (fcntl(file->filefd, F_GETPATH, path) == -1 ||
+      fstat(file->filefd, &st) == -1) return -1;
+  removed = !st.st_nlink;
+  if (stat(path, &named) == -1) {
+    if (errno != ENOENT && errno != ENOTDIR) return -1;
+    removed = true;
+  } else if (named.st_dev != st.st_dev || named.st_ino != st.st_ino) {
+    removed = true;
+  }
+  if (!(source = realpath(device->source, NULL))) return -1;
+  sourcelen = strlen(source);
+  while (sourcelen > 1 && source[sourcelen - 1] == '/') --sourcelen;
+  if (strncmp(path, source, sourcelen) ||
+      (sourcelen > 1 && path[sourcelen] && path[sourcelen] != '/')) {
+    free(source);
+    return enotsup();
+  }
+  suffix = path + (sourcelen == 1 ? 0 : sourcelen);
+  free(source);
+  if (VfsPathBuildFull(info->device->root, NULL, &root) == -1) return -1;
+  rootlen = strlen(root);
+  if (rootlen == 1 && root[0] == '/' && *suffix == '/') rootlen = 0;
+  deleted = removed ? " (deleted)" : "";
+  len = rootlen + strlen(suffix) + strlen(deleted);
+  if (!(*output = malloc(len + 1))) { free(root); return enomem(); }
+  memcpy(*output, root, rootlen);
+  strcpy(*output + rootlen, suffix);
+  strcat(*output, deleted);
+  free(root);
+  return len;
+#else
+  return VfsPathBuildFull(info, NULL, output);
+#endif
+}
+
 static int HostfsStatfs(struct VfsInfo *info, HostStatfs *st) {
   char path[VFS_PATH_MAX];
   if (HostfsGetHostPath(info, path) == -1) return -1;
@@ -1964,6 +2010,7 @@ struct VfsSystem g_hostfs = {.name = "hostfs",
                                  .Finddir = HostfsFinddir,
                                  .Traverse = HostfsTraverse,
                                  .Readlink = HostfsReadlink,
+                                 .Readfdlink = HostfsReadfdlink,
                                  .Mkdir = HostfsMkdir,
                                  .Mkfifo = HostfsMkfifo,
                                  .Open = HostfsOpen,

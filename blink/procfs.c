@@ -72,6 +72,7 @@ struct ProcfsInfo {
     ssize_t (*readlink)(struct VfsInfo *, char **);
     int (*read)(struct VfsInfo *, struct ProcfsOpenFile *);
   };
+  int fd;
 };
 
 struct ProcfsOpenFile {
@@ -123,9 +124,12 @@ enum {
   PROCFS_PIDDIR_ROOT_TYPE,
   PROCFS_PIDDIR_MOUNTS_TYPE,
   PROCFS_PIDDIR_FDDIR_TYPE,
-  PROCFS_PIDDIR_LAST_TYPE = PROCFS_PIDDIR_FDDIR_TYPE
+  PROCFS_PIDDIR_LAST_TYPE = PROCFS_PIDDIR_FDDIR_TYPE,
+  PROCFS_FDLINK_TYPE
 };
 
+static ssize_t ProcfsFdReadlink(struct VfsInfo *, char **);
+static int ProcfsFdReaddir(struct VfsInfo *, struct dirent *);
 static int ProcfsRootReaddir(struct VfsInfo *, struct dirent *);
 static ssize_t ProcfsSelfReadlink(struct VfsInfo *, char **);
 static ssize_t ProcfsToSelfReadlink(struct VfsInfo *, char **);
@@ -183,7 +187,7 @@ static struct ProcfsInfo g_piddirinfos[] = {
                                .read = ProcfsPiddirMountsRead},
     [PROCFS_PIDDIR_FDDIR_TYPE - PROCFS_PIDDIR_TYPE] = {0, S_IFDIR | 0555, 0, 0,
                                                        PROCFS_PIDDIR_FDDIR_TYPE,
-                                                       "fd"},
+                                                       "fd", .readdir = ProcfsFdReaddir},
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -377,6 +381,33 @@ static int ProcfsFinddir(struct VfsInfo *parent, const char *name,
         }
       }
       break;
+    case PROCFS_PIDDIR_FDDIR_TYPE: {
+      struct VfsInfo *target;
+      unsigned fd = 0;
+      const char *p;
+      if (!*name || (name[0] == '0' && name[1])) break;
+      for (p = name; *p; ++p) {
+        if (*p < '0' || *p > '9' || fd > (2147483647u - (*p - '0')) / 10)
+          break;
+        fd = fd * 10 + (*p - '0');
+      }
+      if (*p || VfsGetFd(fd, &target) == -1) break;
+      unassert(!VfsFreeInfo(target));
+      if (!(procoutput = calloc(1, sizeof(*procoutput)))) {
+        enomem();
+        goto cleananddie;
+      }
+      procoutput->ino = PROCFS_FIRST_PID_INO + 1024 + fd;
+      procoutput->mode = S_IFLNK | 0777;
+      procoutput->type = PROCFS_FDLINK_TYPE;
+      procoutput->uid = procparent->uid;
+      procoutput->gid = procparent->gid;
+      procoutput->time = GetTime();
+      procoutput->fd = fd;
+      snprintf(procoutput->name, sizeof(procoutput->name), "%u", fd);
+      procoutput->readlink = ProcfsFdReadlink;
+      break;
+    }
   }
   if (procoutput == NULL) {
     enoent();
@@ -1587,3 +1618,46 @@ struct VfsSystem g_procfs = {.name = "proc",
                              }};
 
 #endif /* DISABLE_VFS */
+
+#ifndef DISABLE_VFS
+static int ProcfsFdReaddir(struct VfsInfo *info, struct dirent *de) {
+  struct ProcfsInfo *proc = info->data;
+  struct ProcfsOpenDir *dir = proc->opendir;
+  int fd;
+  LOCK(&dir->lock);
+  if (dir->index < 2) {
+    de->d_ino = dir->index ? info->ino : info->parent->ino;
+#ifdef DT_DIR
+    de->d_type = DT_DIR;
+#endif
+    strcpy(de->d_name, dir->index++ ? "." : "..");
+  } else {
+    if ((fd = VfsNextFd(dir->index - 2)) == -1) {
+      UNLOCK(&dir->lock);
+      errno = 0;
+      return -1;
+    }
+    de->d_ino = PROCFS_FIRST_PID_INO + 1024 + fd;
+#ifdef DT_LNK
+    de->d_type = DT_LNK;
+#endif
+    snprintf(de->d_name, sizeof(de->d_name), "%d", fd);
+    dir->index = (u64)fd + 3;
+  }
+  UNLOCK(&dir->lock);
+  return 0;
+}
+
+/* Delegate current path resolution to the descriptor filesystem. */
+static ssize_t ProcfsFdReadlink(struct VfsInfo *info, char **buf) {
+  struct VfsInfo *target;
+  struct ProcfsInfo *proc = info->data;
+  ssize_t rc;
+  if (VfsGetFd(proc->fd, &target) == -1) return enoent();
+  rc = target->device->ops->Readfdlink
+           ? target->device->ops->Readfdlink(target, buf)
+           : VfsPathBuildFull(target, NULL, buf);
+  unassert(!VfsFreeInfo(target));
+  return rc;
+}
+#endif

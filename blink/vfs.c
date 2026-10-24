@@ -784,13 +784,26 @@ int VfsGetFd(int fd, struct VfsInfo **output) {
   LOCK(&g_vfs.lock);
   for (e = dll_first(g_vfs.fds); e; e = dll_next(g_vfs.fds, e)) {
     if (VFS_FD_CONTAINER(e)->fd == fd) {
-      UNLOCK(&g_vfs.lock);
       unassert(!VfsAcquireInfo(VFS_FD_CONTAINER(e)->data, output));
+      UNLOCK(&g_vfs.lock);
       return 0;
     }
   }
   UNLOCK(&g_vfs.lock);
   return ebadf();
+}
+
+/* Return the next descriptor number; callers retain no table pointers. */
+int VfsNextFd(u64 minimum) {
+  struct Dll *e;
+  int next = -1, fd;
+  LOCK(&g_vfs.lock);
+  for (e = dll_first(g_vfs.fds); e; e = dll_next(g_vfs.fds, e)) {
+    fd = VFS_FD_CONTAINER(e)->fd;
+    if ((u64)fd >= minimum && (next == -1 || fd < next)) next = fd;
+  }
+  UNLOCK(&g_vfs.lock);
+  return next;
 }
 
 int VfsSetFd(int fd, struct VfsInfo *data) {
