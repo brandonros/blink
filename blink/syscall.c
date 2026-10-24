@@ -3459,7 +3459,8 @@ static int SysUnlinkat(struct Machine *m, i32 dirfd, i64 pathaddr, i32 flags) {
   // it always raises EISDIR, which is so much less ambiguous
   if (rc == -1 && !flags && errno == EPERM) {
     struct stat st;
-    if (!fstatat(dirfd, path, &st, 0) && S_ISDIR(st.st_mode)) {
+    if (!VfsStat(dirfd, path, &st, AT_SYMLINK_NOFOLLOW) &&
+        S_ISDIR(st.st_mode)) {
       errno = EISDIR;
     } else {
       errno = EPERM;
