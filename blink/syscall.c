@@ -266,6 +266,13 @@ bool CheckInterrupt(struct Machine *m, bool restartable) {
   int sig, delivered;
   // an actual i/o call just received EINTR from the kernel
 HandleSomeMoreInterrupts:
+  // Let the syscall unwind its locks and leases before CheckForSignals exits
+  // this thread. SIGSYS wakes host I/O without queuing a guest signal.
+  if (atomic_load_explicit(&m->killed, memory_order_acquire)) {
+    m->interrupted = true;
+    errno = EINTR;
+    return true;
+  }
   // determine if there's any signals pending for our guest
   Put64(m->ax, -EINTR_LINUX);
   if ((sig = ConsumeSignal(m, &delivered, &restart))) {
