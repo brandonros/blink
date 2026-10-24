@@ -146,6 +146,41 @@ void OpPinsrdVdqEdqpIb(P) {
   IGNORE_RACES_END();
 }
 
+void OpPminmax(P) {
+  static const u8 widths[4] = {1, 4, 2, 4};
+  unsigned kind, width, i;
+  bool sign, maximum;
+  i64 a, b;
+  u8 left[16], right[16];
+  if (!Osz(rde) || Rep(rde)) return OpUd(A);
+  kind = Opcode(rde) & 3;
+  width = widths[kind];
+  sign = kind < 2;
+  maximum = Opcode(rde) & 4;
+  IGNORE_RACES_START();
+  memcpy(left, XmmRexrReg(m, rde), 16);
+  memcpy(right, GetModrmRegisterXmmPointerRead16(A), 16);
+  IGNORE_RACES_END();
+  for (i = 0; i < 16; i += width) {
+    if (width == 1) {
+      a = (i8)left[i];
+      b = (i8)right[i];
+    } else if (width == 2) {
+      a = Get16(left + i);
+      b = Get16(right + i);
+    } else {
+      a = Get32(left + i);
+      b = Get32(right + i);
+      if (sign) {
+        a = (i32)a;
+        b = (i32)b;
+      }
+    }
+    if (maximum ? b > a : b < a) memcpy(left + i, right + i, width);
+  }
+  memcpy(XmmRexrReg(m, rde), left, 16);
+}
+
 void OpBlend(P) {
   unsigned op, width, i;
   bool selected;

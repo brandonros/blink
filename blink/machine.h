@@ -704,6 +704,7 @@ void OpPmovx(P);
 void OpRound(P);
 void OpPtest(P);
 void OpBlend(P);
+void OpPminmax(P);
 void OpShuffle(P);
 void OpShufpsd(P);
 void OpSqrtpsd(P);
