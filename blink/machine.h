@@ -165,10 +165,15 @@ struct HostPage {
   struct HostPage *next;
 };
 
+struct HostPageTable {
+  struct HostPageTable *previous;
+  u8 *pages[];
+};
+
 struct HostPages {
   size_t n;
   size_t c;
-  u8 **p;
+  _Atomic(struct HostPageTable *) table;
 };
 
 struct PageLock {
@@ -483,6 +488,8 @@ void ExecuteInstruction(struct Machine *);
 u64 AllocatePageTable(struct System *);
 u64 AllocateAnonymousPage(struct System *);
 void FreeAnonymousPage(struct System *, u8 *);
+void LockHostPageAllocator(void);
+void UnlockHostPageAllocator(void);
 u64 FindPageTableEntry(struct Machine *, u64);
 bool CheckMemoryInvariants(struct System *) nosideeffect dontdiscard;
 i64 ReserveVirtual(struct System *, i64, i64, u64, int, i64, bool, bool);
@@ -862,7 +869,8 @@ static inline u8 *FindHostPage(u64 entry) {
   if (HasLinearMapping()) {
     return (u8 *)(uintptr_t)(entry & PAGE_TA);
   } else {
-    return g_hostpages.p[(entry & PAGE_TA) >> 12];
+    return atomic_load_explicit(&g_hostpages.table, memory_order_acquire)
+        ->pages[(entry & PAGE_TA) >> 12];
   }
 }
 

@@ -53,6 +53,14 @@ struct Allocator {
 struct Machine g_bssmachine;
 struct HostPages g_hostpages;
 
+void LockHostPageAllocator(void) {
+  LOCK(&g_allocator.lock);
+}
+
+void UnlockHostPageAllocator(void) {
+  UNLOCK(&g_allocator.lock);
+}
+
 static void FillPage(void *p, int c) {
   memset(p, c, 4096);
 }
@@ -71,17 +79,30 @@ static void FreeHostPage(struct HostPage *hp) {
 
 static u64 TrackHostPage(u8 *ptr) {
   u64 entry;
+  struct HostPageTable *table, *next;
   if (HasLinearMapping()) {
     return (uintptr_t)ptr;
   } else {
+    LOCK(&g_allocator.lock);
+    table = atomic_load_explicit(&g_hostpages.table, memory_order_relaxed);
     if (g_hostpages.n == g_hostpages.c) {
       g_hostpages.c += 1;
       g_hostpages.c += g_hostpages.c >> 1;
-      g_hostpages.p =
-          realloc(g_hostpages.p, g_hostpages.c * sizeof(*g_hostpages.p));
+      unassert((next = malloc(sizeof(*next) +
+                              g_hostpages.c * sizeof(*next->pages))));
+      next->previous = table;
+      if (table) {
+        memcpy(next->pages, table->pages,
+               g_hostpages.n * sizeof(*next->pages));
+      }
+      // Readers include signal handlers, so they cannot take this lock.
+      // Retain old tables: a reader may still be using a previous snapshot.
+      table = next;
+      atomic_store_explicit(&g_hostpages.table, table, memory_order_release);
     }
     entry = g_hostpages.n++;
-    g_hostpages.p[entry] = ptr;
+    table->pages[entry] = ptr;
+    UNLOCK(&g_allocator.lock);
     return entry << 12;
   }
 }

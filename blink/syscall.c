@@ -421,6 +421,7 @@ static int Fork(struct Machine *m, u64 flags, u64 stack, u64 ctid) {
 #ifdef HAVE_JIT
     LOCK(&m->system->jit.lock);
 #endif
+    LockHostPageAllocator();
   }
   pid = fork();
 #ifdef __HAIKU__
@@ -429,6 +430,7 @@ static int Fork(struct Machine *m, u64 flags, u64 stack, u64 ctid) {
   if (!pid) g_machine = m;
 #endif
   if (m->threaded) {
+    UnlockHostPageAllocator();
 #ifdef HAVE_JIT
     UNLOCK(&m->system->jit.lock);
 #endif

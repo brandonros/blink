@@ -1,5 +1,4 @@
-/* Repeated guest thread creation/join diagnostic. Compare -jm with -m;
-   run under an external timeout. This currently exposes a JIT failure. */
+/* Exercise host-page table growth while other threads access guest stacks. */
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
