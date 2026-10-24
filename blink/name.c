@@ -571,6 +571,7 @@ const char *DescribeMopcode(int code) {
     XLAT(0x233, "OpPmovx");
     XLAT(0x234, "OpPmovx");
     XLAT(0x235, "OpPmovx");
+    XLAT(0x22b, "OpPackusdw");
     XLAT(0x238, "OpPminmax");
     XLAT(0x239, "OpPminmax");
     XLAT(0x23a, "OpPminmax");

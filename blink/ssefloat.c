@@ -173,6 +173,22 @@ void OpPinsrdVdqEdqpIb(P) {
   IGNORE_RACES_END();
 }
 
+void OpPackusdw(P) {
+  unsigned i;
+  i32 value;
+  u8 left[16], right[16], result[16];
+  if (!Osz(rde) || Rep(rde)) return OpUd(A);
+  IGNORE_RACES_START();
+  memcpy(left, XmmRexrReg(m, rde), 16);
+  memcpy(right, GetModrmRegisterXmmPointerRead16(A), 16);
+  IGNORE_RACES_END();
+  for (i = 0; i < 8; ++i) {
+    value = Get32((i < 4 ? left : right) + (i & 3) * 4);
+    Put16(result + i * 2, value < 0 ? 0 : value > 65535 ? 65535 : value);
+  }
+  memcpy(XmmRexrReg(m, rde), result, 16);
+}
+
 void OpPminmax(P) {
   static const u8 widths[4] = {1, 4, 2, 4};
   unsigned kind, width, i;
