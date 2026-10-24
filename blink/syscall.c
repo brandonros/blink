@@ -244,20 +244,19 @@ bool DeliverSignalRecursively(struct Machine *m, int sig) {
   // it's very important that no locks are currently held
   // garbage may exist on the freelist for calls like sendmsg
   ++m->sigdepth;
-  if ((issigsuspend = m->issigsuspend)) {
-    m->issigsuspend = false;
-    unassert(!sigemptyset(&unblock));
-    unassert(!pthread_sigmask(SIG_SETMASK, &unblock, &oldmask));
-  }
+  issigsuspend = m->issigsuspend;
+  m->issigsuspend = false;
+  // Atomic wait routines block host signals around their pending-signal
+  // check. Guest handlers must still receive wakeups if they wait in turn.
+  unassert(!sigemptyset(&unblock));
+  unassert(!pthread_sigmask(SIG_SETMASK, &unblock, &oldmask));
   m->restored = false;
   m->insyscall = false;
   SignalActor(m);
   m->insyscall = true;
   m->restored = false;
-  if (issigsuspend) {
-    unassert(!pthread_sigmask(SIG_SETMASK, &oldmask, 0));
-    m->issigsuspend = true;
-  }
+  unassert(!pthread_sigmask(SIG_SETMASK, &oldmask, 0));
+  m->issigsuspend = issigsuspend;
   --m->sigdepth;
   return true;
 }
