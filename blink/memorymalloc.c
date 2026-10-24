@@ -1111,18 +1111,19 @@ static u8 *GetRemapSlot(struct System *s, i64 virt) {
   }
 }
 
-/* Caller holds mmap_lock. Eagerly zero private anonymous data pages while
+/* Caller holds mmap_lock. Eagerly zero private anonymous pages while
    retaining their mapping and protections. Other mapping kinds need separate
    handling; in particular, shared mappings must never be cleared this way. */
 int DiscardAnonymousVirtual(struct System *s, i64 addr, i64 size) {
   i64 i;
   u64 entry;
   u8 *slot;
+  bool executable = false;
   if (HasLinearMapping()) return einval();
   for (i = 0; i < size; i += 4096) {
     if (!(slot = GetRemapSlot(s, addr + i))) return enomem();
     entry = LoadPte(slot);
-    if ((entry & (PAGE_MAP | PAGE_MUG | PAGE_FILE)) || !(entry & PAGE_XD))
+    if (entry & (PAGE_MAP | PAGE_MUG | PAGE_FILE))
       return einval();
   }
   for (i = 0; i < size; i += 4096) {
@@ -1130,8 +1131,15 @@ int DiscardAnonymousVirtual(struct System *s, i64 addr, i64 size) {
     entry = LoadPte(slot);
     if (!(entry & PAGE_RSRV)) {
       memset(GetPageAddress(s, entry, false), 0, 4096);
+      if (!(entry & PAGE_XD)) {
+        executable = true;
+#ifdef HAVE_JIT
+        if (!IsJitDisabled(&s->jit)) ResetJitPage(&s->jit, addr + i);
+#endif
+      }
     }
   }
+  if (executable) InvalidateSystem(s, false, true);
   return 0;
 }
 
