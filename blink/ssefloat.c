@@ -209,6 +209,20 @@ void OpPinsrdVdqEdqpIb(P) {
   IGNORE_RACES_END();
 }
 
+void OpPcmpeqq(P) {
+  unsigned i;
+  u8 left[16], right[16];
+  if (!Osz(rde) || Rep(rde)) return OpUd(A);
+  IGNORE_RACES_START();
+  memcpy(left, XmmRexrReg(m, rde), 16);
+  memcpy(right, GetModrmRegisterXmmPointerRead16(A), 16);
+  IGNORE_RACES_END();
+  for (i = 0; i < 16; i += 8) {
+    Put64(XmmRexrReg(m, rde) + i,
+          Get64(left + i) == Get64(right + i) ? -1 : 0);
+  }
+}
+
 void OpPcmpgtq(P) {
   unsigned i;
   u8 left[16], right[16];

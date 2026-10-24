@@ -702,6 +702,7 @@ void OpPextrbw(P);
 void OpExtractpsEdVpsIb(P);
 void OpPackusdw(P);
 void OpPcmpgtq(P);
+void OpPcmpeqq(P);
 void OpPinsrwVdqEwIb(P);
 void OpPinsrbVdqEdIb(P);
 void OpPinsrdVdqEdqpIb(P);
