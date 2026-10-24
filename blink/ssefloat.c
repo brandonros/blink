@@ -146,6 +146,44 @@ void OpPinsrdVdqEdqpIb(P) {
   IGNORE_RACES_END();
 }
 
+void OpPmovx(P) {
+  static const u8 widths[6][2] = {{1, 2}, {1, 4}, {1, 8},
+                                 {2, 4}, {2, 8}, {4, 8}};
+  unsigned kind, srcsize, dstsize, i;
+  bool sign;
+  u8 source[8], result[16];
+  u64 value;
+  if (!Osz(rde) || Rep(rde)) return OpUd(A);
+  kind = Opcode(rde) & 15;
+  if (kind >= 6) return OpUd(A);
+  sign = !(Opcode(rde) & 16);
+  srcsize = widths[kind][0];
+  dstsize = widths[kind][1];
+  IGNORE_RACES_START();
+  memcpy(source, GetModrmRegisterXmmPointerRead(A, 16 / dstsize * srcsize),
+         16 / dstsize * srcsize);
+  IGNORE_RACES_END();
+  for (i = 0; i < 16 / dstsize; ++i) {
+    if (srcsize == 1) {
+      value = sign ? (i64)(i8)source[i] : source[i];
+    } else if (srcsize == 2) {
+      value = Get16(source + i * 2);
+      if (sign) value = (i64)(i16)value;
+    } else {
+      value = Get32(source + i * 4);
+      if (sign) value = (i64)(i32)value;
+    }
+    if (dstsize == 2) {
+      Put16(result + i * 2, value);
+    } else if (dstsize == 4) {
+      Put32(result + i * 4, value);
+    } else {
+      Put64(result + i * 8, value);
+    }
+  }
+  memcpy(XmmRexrReg(m, rde), result, 16);
+}
+
 // Intel SDM Vol. 2B, section 4.1: packed string comparison controls.
 static unsigned StringLength(i64 length, unsigned limit) {
   if (length >= limit || length <= -(i64)limit) return limit;
