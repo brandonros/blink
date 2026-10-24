@@ -1097,6 +1097,75 @@ int FreeVirtual(struct System *s, i64 virt, i64 size) {
   return rc;
 }
 
+/* Caller holds mmap_lock. Return an existing 4 KiB page-table slot. */
+static u8 *GetRemapSlot(struct System *s, i64 virt) {
+  u64 pt = s->cr3;
+  unsigned level;
+  u8 *slot;
+  for (level = 39;; level -= 9) {
+    slot = GetPageAddress(s, pt, level == 39) + ((virt >> level) & 511) * 8;
+    pt = LoadPte(slot);
+    if (!(pt & PAGE_V)) return 0;
+    if (level == 12) return slot;
+    if (pt & PAGE_PS) return 0;
+  }
+}
+
+/* Resize non-linear private anonymous data without copying resident pages.
+   File-backed/shared, executable, and linear mappings remain unsupported. */
+i64 RemapAnonymousVirtual(struct System *s, i64 oldaddr, i64 oldsize,
+                            i64 newsize, bool maymove) {
+  i64 i, dest;
+  u64 key = 0, entry, replacement;
+  u8 *src, *dst;
+  if (HasLinearMapping()) return enomem();
+  for (i = 0; i < oldsize; i += 4096) {
+    if (!(src = GetRemapSlot(s, oldaddr + i))) return efault();
+    entry = LoadPte(src);
+    if ((entry & (PAGE_MAP | PAGE_MUG | PAGE_FILE)) || !(entry & PAGE_XD))
+      return enomem();
+    if (!i) key = entry & (PAGE_RW | PAGE_U | PAGE_XD);
+    if ((entry & (PAGE_RW | PAGE_U | PAGE_XD)) != key) return enomem();
+  }
+  if (newsize <= oldsize) {
+    if (newsize < oldsize && FreeVirtual(s, oldaddr + newsize, oldsize - newsize))
+      return -1;
+    return oldaddr;
+  }
+  if ((newsize - oldsize) / 4096 > GetMaxVss(s) - s->vss) return enomem();
+  if (IsValidAddrSize(oldaddr, newsize) &&
+      IsFullyUnmapped(s, oldaddr + oldsize, newsize - oldsize)) {
+    if (ReserveVirtual(s, oldaddr + oldsize, newsize - oldsize, key,
+                       -1, 0, false, false) == -1) return -1;
+    return oldaddr;
+  }
+  if (!maymove) return enomem();
+  if ((dest = FindVirtual(s, s->automap, newsize)) == -1) return -1;
+  if (ReserveVirtual(s, dest, newsize, key, -1, 0, false, false) == -1) return -1;
+  for (i = 0; i < oldsize; i += 4096) {
+    src = GetRemapSlot(s, oldaddr + i);
+    dst = GetRemapSlot(s, dest + i);
+    unassert(src && dst);
+    replacement = LoadPte(dst);
+    for (;;) {
+      entry = LoadPte(src);
+      if (entry & PAGE_LOCKS) {
+        WaitForPageToNotBeLocked(s, oldaddr + i, src);
+      } else if (CasPte(src, entry, replacement)) {
+        break;
+      }
+    }
+    StorePte(dst, entry);
+  }
+  /* The old range now owns the destination's unused reservations. Freeing it
+     balances vss/reserved counters without releasing the moved host pages. */
+  unassert(!FreeVirtual(s, oldaddr, oldsize));
+  InvalidateSystem(s, true, false);
+  s->automap = dest + newsize;
+  if (s->automap >= FLAG_automapend) s->automap = FLAG_automapstart;
+  return dest;
+}
+
 int GetProtection(u64 key) {
   int prot = 0;
   if (key & PAGE_U) prot |= PROT_READ;

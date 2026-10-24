@@ -488,6 +488,7 @@ bool CheckMemoryInvariants(struct System *) nosideeffect dontdiscard;
 i64 ReserveVirtual(struct System *, i64, i64, u64, int, i64, bool, bool);
 char *FormatPml4t(struct Machine *);
 i64 FindVirtual(struct System *, i64, i64);
+i64 RemapAnonymousVirtual(struct System *, i64, i64, i64, bool);
 int FreeVirtual(struct System *, i64, i64);
 void CleanseMemory(struct System *, size_t);
 void LoadArgv(struct Machine *, char *, char *, char **, char **, u8[16]);

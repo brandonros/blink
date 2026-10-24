@@ -1258,11 +1258,20 @@ static i64 SysMmap(struct Machine *m, i64 virt, u64 size, int prot, int flags,
 
 static i64 SysMremap(struct Machine *m, i64 old_address, u64 old_size,
                      u64 new_size, int flags, i64 new_address) {
-  // would be nice to have
-  // avoid being noisy in the logs
-  // hope program has fallback for failure
-  LOG_ONCE(MEM_LOGF("mremap() not supported yet"));
-  return enomem();
+  i64 res;
+  if (flags & ~MREMAP_MAYMOVE_LINUX) return einval();
+  if (!IsValidAddrSize(old_address, old_size) || !new_size ||
+      new_size > 0x7ffffffff000) return einval();
+  old_size = ROUNDUP(old_size, 4096);
+  new_size = ROUNDUP(new_size, 4096);
+  BEGIN_NO_PAGE_FAULTS;
+  LOCK(&m->system->mmap_lock);
+  res = RemapAnonymousVirtual(m->system, old_address, old_size, new_size,
+                              flags & MREMAP_MAYMOVE_LINUX);
+  unassert(CheckMemoryInvariants(m->system));
+  UNLOCK(&m->system->mmap_lock);
+  END_NO_PAGE_FAULTS;
+  return res;
 }
 
 static int XlatMsyncFlags(int flags) {

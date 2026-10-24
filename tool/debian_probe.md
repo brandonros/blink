@@ -73,7 +73,7 @@ its default cache. The syscall trace contains:
 mremap(0x2000011ec000, 0x1800000, 0x1900000, 0x1, 0) -> -ENOMEM
 ```
 
-`SysMremap` currently returns ENOMEM unconditionally. The diagnostic command
+At that checkpoint `SysMremap` returned ENOMEM unconditionally. The diagnostic command
 `apt-cache -o APT::Cache-Start=134217728 gencaches` succeeds with those indexes.
 Starting with a larger allocation bypasses this particular growth request; it
 does not add mremap support or establish package installation compatibility.
@@ -90,3 +90,31 @@ descriptor, symlink, missing-path, and invalid-descriptor behavior. Under a VFS
 root the old binary exits 2; the patched binary passes with `-m` and `-jm`.
 The VFS-disabled code path also passes a native compilation check. With the
 patch, APT gets past the space check and starts downloading the 50 dependencies.
+
+## Private anonymous mremap support
+
+Non-linear mode now supports resizing non-executable, private anonymous mappings
+with uniform protection. It validates the source before changing it, grows in
+place when possible, and relocates page-table entries when MAYMOVE is allowed.
+Resident data and lazy zero pages are preserved without copying the cache.
+File-backed/shared, executable, linear-mode, FIXED, and DONTUNMAP cases remain
+unsupported. This is partial support, not a complete implementation of
+[Linux mremap](https://man7.org/linux/man-pages/man2/mremap.2.html).
+
+`tool/mremap_anon_probe.c` covers forced relocation, growth without MAYMOVE,
+zero filling, shrinking, read-only mappings, malformed requests, and rejecting
+shared mappings without damaging them. Compile it as a static AMD64 Linux ELF,
+copy it into the supplied rootfs, and run it with `-m` and `-jm`. It is an opt-in
+probe because linear mode is not yet implemented. The original stub exits 5;
+both patched modes pass. For example:
+
+```sh
+x86_64-linux-musl-gcc -static -O tool/mremap_anon_probe.c -o /tmp/remap-probe
+cp /tmp/remap-probe /path/to/rootfs/tmp/remap-probe
+o/blink/blink -m -C /path/to/rootfs /tmp/remap-probe
+o/blink/blink -jm -C /path/to/rootfs /tmp/remap-probe
+```
+
+With the trixie indexes already downloaded, `apt-cache gencaches` now exits 0
+using its default cache size, without the Cache-Start override. Its syscall
+trace shows successful growth both in place and to new addresses.
