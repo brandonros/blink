@@ -552,6 +552,12 @@ const char *DescribeMopcode(int code) {
     XLAT(0x22a, "OpMovntdqaVdqMdq");
     XLAT(0x240, "OpSsePmulld");
     XLAT(0x30f, "OpSsePalignr");
+    XLAT(0x210, "OpBlend");
+    XLAT(0x214, "OpBlend");
+    XLAT(0x215, "OpBlend");
+    XLAT(0x30c, "OpBlend");
+    XLAT(0x30d, "OpBlend");
+    XLAT(0x30e, "OpBlend");
     XLAT(0x217, "OpPtest");
     XLAT(0x220, "OpPmovx");
     XLAT(0x221, "OpPmovx");

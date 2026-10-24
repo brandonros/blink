@@ -146,6 +146,32 @@ void OpPinsrdVdqEdqpIb(P) {
   IGNORE_RACES_END();
 }
 
+void OpBlend(P) {
+  unsigned op, width, i;
+  bool selected;
+  u8 left[16], right[16], mask[16];
+  if (!Osz(rde) || Rep(rde)) return OpUd(A);
+  op = Opcode(rde);
+  switch (op) {
+    case 0x10: width = 1; break;  // PBLENDVB
+    case 0x0e: width = 2; break;  // PBLENDW
+    case 0x0c: case 0x14: width = 4; break;  // BLENDPS / BLENDVPS
+    case 0x0d: case 0x15: width = 8; break;  // BLENDPD / BLENDVPD
+    default: return OpUd(A);
+  }
+  IGNORE_RACES_START();
+  memcpy(left, XmmRexrReg(m, rde), 16);
+  memcpy(right, GetModrmRegisterXmmPointerRead16(A), 16);
+  memcpy(mask, m->xmm[0], 16);
+  IGNORE_RACES_END();
+  for (i = 0; i < 16; i += width) {
+    selected = op < 0x10 ? (uimm0 >> (i / width)) & 1
+                         : !!(mask[i + width - 1] & 128);
+    if (selected) memcpy(left + i, right + i, width);
+  }
+  memcpy(XmmRexrReg(m, rde), left, 16);
+}
+
 void OpPtest(P) {
   u64 a[2], b[2];
   u8 *p;
