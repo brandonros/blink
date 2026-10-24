@@ -670,10 +670,21 @@ static int SysFutexWait(struct Machine *m,  //
     }
     timeout.tv_sec = Read64(gtimeout->sec);
     timeout.tv_nsec = Read64(gtimeout->nsec);
-    if (!(0 <= timeout.tv_nsec && timeout.tv_nsec < 1000000000)) {
+    if (!(0 <= timeout.tv_sec && 0 <= timeout.tv_nsec &&
+          timeout.tv_nsec < 1000000000)) {
       return einval();
     }
-    deadline = AddTime(now, timeout);
+    if ((op & ~FUTEX_CLOCK_REALTIME_LINUX) == FUTEX_WAIT_BITSET_LINUX) {
+      if (op & FUTEX_CLOCK_REALTIME_LINUX) {
+        deadline = timeout;
+      } else {
+        struct timespec monotonic;
+        if (clock_gettime(CLOCK_MONOTONIC, &monotonic)) return -1;
+        deadline = AddTime(now, SubtractTime(timeout, monotonic));
+      }
+    } else {
+      deadline = AddTime(now, timeout);
+    }
   } else {
     deadline = GetMaxTime();
   }
@@ -761,12 +772,15 @@ static int SysFutex(struct Machine *m,  //
       return SysFutexWake(m, uaddr, val);
     case FUTEX_WAIT_BITSET_LINUX:
     case FUTEX_WAIT_BITSET_LINUX | FUTEX_CLOCK_REALTIME_LINUX:
-      // will be supported soon
-      // avoid logging when cosmo feature checks this
-      if (!m->system->iscosmo) goto DefaultCase;
-      return einval();
+      // Shared condition variables currently support the match-all mask.
+      if (!val3) return einval();
+      if (val3 != UINT32_MAX) return enotsup();
+      return SysFutexWait(m, uaddr, op, val, timeout_addr);
+    case FUTEX_WAKE_BITSET_LINUX:
+      if (!val3) return einval();
+      if (val3 != UINT32_MAX) return enotsup();
+      return SysFutexWake(m, uaddr, val);
     default:
-    DefaultCase:
       LOGF("unsupported %s op %#x", "futex", op);
       return einval();
   }
