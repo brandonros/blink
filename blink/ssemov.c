@@ -82,9 +82,9 @@ void OpLddquVdqMdq(P) {
 void OpMovntiMdqpGdqp(P) {
   IGNORE_RACES_START();
   if (Rexw(rde)) {
-    memcpy(ComputeReserveAddressWrite8(A), XmmRexrReg(m, rde), 8);
+    memcpy(ComputeReserveAddressWrite8(A), RegRexrReg(m, rde), 8);
   } else {
-    memcpy(ComputeReserveAddressWrite4(A), XmmRexrReg(m, rde), 4);
+    memcpy(ComputeReserveAddressWrite4(A), RegRexrReg(m, rde), 4);
   }
   IGNORE_RACES_END();
 }
