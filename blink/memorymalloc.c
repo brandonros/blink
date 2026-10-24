@@ -1111,6 +1111,30 @@ static u8 *GetRemapSlot(struct System *s, i64 virt) {
   }
 }
 
+/* Caller holds mmap_lock. Eagerly zero private anonymous data pages while
+   retaining their mapping and protections. Other mapping kinds need separate
+   handling; in particular, shared mappings must never be cleared this way. */
+int DiscardAnonymousVirtual(struct System *s, i64 addr, i64 size) {
+  i64 i;
+  u64 entry;
+  u8 *slot;
+  if (HasLinearMapping()) return einval();
+  for (i = 0; i < size; i += 4096) {
+    if (!(slot = GetRemapSlot(s, addr + i))) return enomem();
+    entry = LoadPte(slot);
+    if ((entry & (PAGE_MAP | PAGE_MUG | PAGE_FILE)) || !(entry & PAGE_XD))
+      return einval();
+  }
+  for (i = 0; i < size; i += 4096) {
+    slot = GetRemapSlot(s, addr + i);
+    entry = LoadPte(slot);
+    if (!(entry & PAGE_RSRV)) {
+      memset(GetPageAddress(s, entry, false), 0, 4096);
+    }
+  }
+  return 0;
+}
+
 /* Resize non-linear private anonymous data without copying resident pages.
    File-backed/shared, executable, and linear mappings remain unsupported. */
 i64 RemapAnonymousVirtual(struct System *s, i64 oldaddr, i64 oldsize,

@@ -1098,6 +1098,20 @@ static int SysMprotect(struct Machine *m, i64 addr, u64 size, int prot) {
 }
 
 static int SysMadvise(struct Machine *m, i64 addr, u64 len, int advice) {
+  int rc;
+  if (advice == 4) {  // Linux MADV_DONTNEED changes observable memory contents.
+    if (addr & 4095) return einval();
+    if (!len) return 0;
+    if (len > INT64_MAX - 4095) return einval();
+    len = ROUNDUP(len, 4096);
+    if (!IsValidAddrSize(addr, len)) return einval();
+    BEGIN_NO_PAGE_FAULTS;
+    LOCK(&m->system->mmap_lock);
+    rc = DiscardAnonymousVirtual(m->system, addr, len);
+    UNLOCK(&m->system->mmap_lock);
+    END_NO_PAGE_FAULTS;
+    return rc;
+  }
   return 0;
 }
 
