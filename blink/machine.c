@@ -2084,6 +2084,10 @@ nexgen32e_f GetOp(long op) {
       XLAT(0x30f, OpSsePalignr);
       XLAT(0x322, OpPinsrdVdqEdqpIb);
       XLAT(0x344, OpSsePclmulqdq);
+      XLAT(0x360, OpPcmpstr);
+      XLAT(0x361, OpPcmpstr);
+      XLAT(0x362, OpPcmpstr);
+      XLAT(0x363, OpPcmpstr);
       XLAT(0x3f0, OpRorx);
       default:
         return OpUd;

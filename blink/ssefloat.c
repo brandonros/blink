@@ -146,6 +146,90 @@ void OpPinsrdVdqEdqpIb(P) {
   IGNORE_RACES_END();
 }
 
+// Intel SDM Vol. 2B, section 4.1: packed string comparison controls.
+static unsigned StringLength(i64 length, unsigned limit) {
+  if (length >= limit || length <= -(i64)limit) return limit;
+  return length < 0 ? -length : length;
+}
+
+void OpPcmpstr(P) {
+  int a[16], b[16];
+  unsigned i, j, n, na, nb, mask = 0, mode, width, op;
+  bool match;
+  u8 left[16], right[16], result[16] = {0};
+  if (!Osz(rde) || Rep(rde)) return OpUd(A);
+  op = Opcode(rde);
+  width = 1 + (uimm0 & 1);
+  n = 16 / width;
+  mode = (uimm0 >> 2) & 3;
+  IGNORE_RACES_START();
+  memcpy(left, XmmRexrReg(m, rde), 16);
+  memcpy(right, GetModrmRegisterXmmPointerRead16(A), 16);
+  IGNORE_RACES_END();
+  for (i = 0; i < n; ++i) {
+    a[i] = width == 2 ? Get16(left + i * 2) : left[i];
+    b[i] = width == 2 ? Get16(right + i * 2) : right[i];
+    if (uimm0 & 2) {
+      a[i] = width == 2 ? (i16)a[i] : (i8)a[i];
+      b[i] = width == 2 ? (i16)b[i] : (i8)b[i];
+    }
+  }
+  if (op & 2) {
+    for (na = 0; na < n && a[na]; ++na) {}
+    for (nb = 0; nb < n && b[nb]; ++nb) {}
+  } else {
+    na = StringLength(Rexw(rde) ? (i64)Read64(m->ax) : (i32)Read32(m->ax), n);
+    nb = StringLength(Rexw(rde) ? (i64)Read64(m->dx) : (i32)Read32(m->dx), n);
+  }
+  for (j = 0; j < n; ++j) {
+    match = false;
+    switch (mode) {
+      case 0:  // equal any
+        for (i = 0; i < na && j < nb; ++i) match |= a[i] == b[j];
+        break;
+      case 1:  // ranges; both bounds must be valid
+        for (i = 0; i + 1 < na && j < nb; i += 2) {
+          match |= a[i] <= b[j] && b[j] <= a[i + 1];
+        }
+        break;
+      case 2:  // equal each; two invalid elements compare equal
+        match = j < na && j < nb ? a[j] == b[j] : j >= na && j >= nb;
+        break;
+      case 3:  // equal ordered, including partial matches at the vector end
+        match = true;
+        for (i = 0; i < na && i + j < n; ++i) {
+          match &= i + j < nb && a[i] == b[i + j];
+        }
+        break;
+    }
+    mask |= (unsigned)match << j;
+  }
+  if (uimm0 & 16) mask ^= (1u << ((uimm0 & 32) ? nb : n)) - 1;
+  m->flags = SetFlag(m->flags, FLAGS_CF, mask != 0);
+  m->flags = SetFlag(m->flags, FLAGS_ZF, nb < n);
+  m->flags = SetFlag(m->flags, FLAGS_SF, na < n);
+  m->flags = SetFlag(m->flags, FLAGS_OF, mask & 1);
+  m->flags = SetFlag(m->flags, FLAGS_AF, false);
+  m->flags = SetFlag(m->flags, FLAGS_PF, false);
+  if (op & 1) {
+    i = n;
+    for (j = 0; j < n; ++j) {
+      if (mask & (1u << j)) {
+        i = j;
+        if (!(uimm0 & 64)) break;
+      }
+    }
+    Put64(m->cx, i);
+  } else {
+    if (uimm0 & 64) {
+      for (i = 0; i < 16; ++i) result[i] = -(!!(mask & (1u << (i / width))));
+    } else {
+      Put16(result, mask);
+    }
+    memcpy(m->xmm[0], result, 16);
+  }
+}
+
 void OpShuffle(P) {
   i16 q16[4];
   void *kernel;

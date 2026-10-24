@@ -1300,6 +1300,18 @@ const char *DisSpecMap3(struct XedDecodedInst *x, char *p) {
     case 0x22:
       if (!Osz(x->op.rde) || Rep(x->op.rde)) return "wut";
       return Rexw(x->op.rde) ? "pinsrq %Vdq Eq Ib" : "pinsrd %Vdq Ed Ib";
+    case 0x60:
+      if (!Osz(x->op.rde) || Rep(x->op.rde)) return "wut";
+      return "pcmpestrm Vdq Wdq Ib";
+    case 0x61:
+      if (!Osz(x->op.rde) || Rep(x->op.rde)) return "wut";
+      return "pcmpestri Vdq Wdq Ib";
+    case 0x62:
+      if (!Osz(x->op.rde) || Rep(x->op.rde)) return "wut";
+      return "pcmpistrm Vdq Wdq Ib";
+    case 0x63:
+      if (!Osz(x->op.rde) || Rep(x->op.rde)) return "wut";
+      return "pcmpistri Vdq Wdq Ib";
     case 0x44:  // pclmulqdq
       if (Osz(x->op.rde)) {
         switch (x->op.uimm0) {
