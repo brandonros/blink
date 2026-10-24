@@ -2126,6 +2126,7 @@ nexgen32e_f GetOp(long op) {
       XLAT(0x321, OpInsertps);
       XLAT(0x322, OpPinsrdVdqEdqpIb);
       XLAT(0x344, OpSsePclmulqdq);
+      XLAT(0x342, OpMpsadbw);
       XLAT(0x360, OpPcmpstr);
       XLAT(0x361, OpPcmpstr);
       XLAT(0x362, OpPcmpstr);

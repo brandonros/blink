@@ -706,6 +706,7 @@ void OpPcmpeqq(P);
 void OpPmuldq(P);
 void OpInsertps(P);
 void OpPhminposuw(P);
+void OpMpsadbw(P);
 void OpPinsrwVdqEwIb(P);
 void OpPinsrbVdqEdIb(P);
 void OpPinsrdVdqEdqpIb(P);

@@ -209,6 +209,27 @@ void OpPinsrdVdqEdqpIb(P) {
   IGNORE_RACES_END();
 }
 
+void OpMpsadbw(P) {
+  unsigned i, j, source_offset, destination_offset, sum;
+  int difference;
+  u8 left[16], right[16];
+  if (!Osz(rde) || Rep(rde)) return OpUd(A);
+  IGNORE_RACES_START();
+  memcpy(left, XmmRexrReg(m, rde), 16);
+  memcpy(right, GetModrmRegisterXmmPointerRead16(A), 16);
+  IGNORE_RACES_END();
+  source_offset = (uimm0 & 3) * 4;
+  destination_offset = ((uimm0 >> 2) & 1) * 4;
+  for (i = 0; i < 8; ++i) {
+    sum = 0;
+    for (j = 0; j < 4; ++j) {
+      difference = left[destination_offset + i + j] - right[source_offset + j];
+      sum += difference < 0 ? -difference : difference;
+    }
+    Put16(XmmRexrReg(m, rde) + i * 2, sum);
+  }
+}
+
 void OpPhminposuw(P) {
   unsigned i, index, minimum, value;
   u8 source[16];

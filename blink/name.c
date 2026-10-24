@@ -600,6 +600,7 @@ const char *DescribeMopcode(int code) {
     XLAT(0x362, "OpPcmpstr");
     XLAT(0x363, "OpPcmpstr");
     XLAT(0x344, "OpSsePclmulqdq");
+    XLAT(0x342, "OpMpsadbw");
     default:
       return "UNKNOWN";
   }
