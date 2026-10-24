@@ -3137,6 +3137,30 @@ static int SysFchmodat(struct Machine *m, i32 dirfd, i64 path, u32 mode) {
   return VfsChmod(GetDirFildes(dirfd), LoadStr(m, path), mode, 0);
 }
 
+static int SysFchmodat2(struct Machine *m, i32 dirfd, i64 pathaddr, u32 mode,
+                       i32 flags) {
+  const char *path;
+  struct stat st;
+  int hostflags = 0;
+  if (flags & ~(AT_SYMLINK_NOFOLLOW_LINUX | AT_EMPTY_PATH_LINUX))
+    return einval();
+  if (!(path = LoadStr(m, pathaddr))) return -1;
+  if (!*path && (flags & AT_EMPTY_PATH_LINUX)) {
+    if (dirfd == AT_FDCWD_LINUX)
+      return VfsChmod(AT_FDCWD, ".", mode, 0);
+    if (VfsFstat(dirfd, &st) == -1) return -1;
+    if (S_ISLNK(st.st_mode)) return eopnotsupp();
+    return VfsFchmod(dirfd, mode);
+  }
+  if (flags & AT_SYMLINK_NOFOLLOW_LINUX) {
+    hostflags = AT_SYMLINK_NOFOLLOW;
+    if (VfsStat(GetDirFildes(dirfd), path, &st, hostflags) == -1) return -1;
+    // Linux symlink permissions are fixed, even on hosts that allow lchmod.
+    if (S_ISLNK(st.st_mode)) return eopnotsupp();
+  }
+  return VfsChmod(GetDirFildes(dirfd), path, mode, hostflags);
+}
+
 static int SysFcntlLock(struct Machine *m, int systemfd, int cmd, i64 arg) {
   int rc;
   int whence;
@@ -5673,6 +5697,7 @@ void OpSyscall(P) {
     SYSCALL(3, 0x10A, "symlinkat", SysSymlinkat, STRACE_SYMLINKAT);
     SYSCALL(4, 0x10B, "readlinkat", SysReadlinkat, STRACE_READLINKAT);
     SYSCALL(3, 0x10C, "fchmodat", SysFchmodat, STRACE_FCHMODAT);
+    SYSCALL(4, 0x1C4, "fchmodat2", SysFchmodat2, STRACE_4);
 #ifndef DISABLE_SOCKETS
     SYSCALL(3, 0x029, "socket", SysSocket, STRACE_SOCKET);
     SYSCALL(3, 0x02A, "connect", SysConnect, STRACE_CONNECT);
