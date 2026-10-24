@@ -534,7 +534,7 @@ int XlatSocketFamily(int x) {
     XLAT(AF_INET6_LINUX, AF_INET6);
     default:
       LOGF("%s %d not supported yet", "socket family", x);
-      errno = ENOPROTOOPT;
+      errno = EAFNOSUPPORT;
       return -1;
   }
 }
