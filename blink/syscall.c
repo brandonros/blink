@@ -2698,9 +2698,10 @@ static i64 Getdents(struct Machine *m, i32 fildes, i64 addr, i64 size,
   struct dirent *ent;
   struct dirent_linux rec;
   if (size < sizeof(rec) - sizeof(rec.name)) return einval();
-  if ((fd->oflags & O_DIRECTORY) != O_DIRECTORY) return enotdir();
   if (!IsValidMemory(m, addr, size, PROT_WRITE)) return -1;
-  if (VfsFstat(fildes, &st) || !st.st_nlink) return enoent();
+  if (VfsFstat(fildes, &st)) return -1;
+  if (!S_ISDIR(st.st_mode)) return enotdir();
+  if (!st.st_nlink) return enoent();
   if (!fd->dirstream && !(fd->dirstream = VfsOpendir(fd->fildes))) {
     return -1;
   }
