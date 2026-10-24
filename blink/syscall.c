@@ -1094,7 +1094,9 @@ static i64 SysBrk(struct Machine *m, i64 addr) {
   BEGIN_NO_PAGE_FAULTS;
   LOCK(&m->system->mmap_lock);
   MEM_LOGF("brk(%#" PRIx64 ") currently %#" PRIx64, addr, m->system->brk);
-  pagesize = FLAG_pagesize;
+  // Match AT_PAGESZ: non-linear mappings use 4 KiB guest pages even when
+  // the host page size is larger. Host rounding breaks glibc heap accounting.
+  pagesize = HasLinearMapping() ? FLAG_pagesize : 4096;
   addr = ROUNDUP(addr, pagesize);
   if (addr >= kNullSize) {
     if (addr > m->system->brk) {
