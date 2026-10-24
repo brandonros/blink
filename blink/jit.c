@@ -131,6 +131,7 @@ static struct JitGlobals {
   pthread_mutex_t_ lock;
   _Atomic(long) prot;
   int freecount;
+  long brk;  // global allocation cursor into g_code, guarded by lock
   struct Dll *freeblocks;
 } g_jit = {
     PTHREAD_MUTEX_INITIALIZER_,
@@ -752,7 +753,6 @@ static void UnlockJit(struct Jit *jit) {
  * @return 0 on success
  */
 int InitJit(struct Jit *jit, uintptr_t opt_staging_function) {
-  long brk;
   unsigned n;
   struct JitBlock *jb;
   _Atomic(int) *funcs;
@@ -773,10 +773,12 @@ int InitJit(struct Jit *jit, uintptr_t opt_staging_function) {
   unassert(funcs = (_Atomic(int) *)Calloc(n, sizeof(*funcs)));
   atomic_store_explicit(&jit->hooks.virts, virts, memory_order_relaxed);
   atomic_store_explicit(&jit->hooks.funcs, funcs, memory_order_relaxed);
-  for (brk = 0; (jb = InitJitBlock(jit, &brk));) {
+  LOCK(&g_jit.lock);
+  while ((jb = InitJitBlock(jit, &g_jit.brk))) {
     dll_make_last(&g_jit.freeblocks, &jb->elem);
     ++g_jit.freecount;
   }
+  UNLOCK(&g_jit.lock);
   JIT_LOGF("initialized jit %p", jit);
   return 0;
 }
@@ -824,12 +826,15 @@ int DestroyJit(struct Jit *jit) {
 int ShutdownJit(void) {
   struct Dll *e;
   JIT_LOGF("shutting down jit");
+  LOCK(&g_jit.lock);
   while ((e = dll_first(g_jit.freeblocks))) {
     dll_remove(&g_jit.freeblocks, e);
     FreeJitBlock(JITBLOCK_CONTAINER(e));
     --g_jit.freecount;
   }
   unassert(!g_jit.freecount);
+  g_jit.brk = 0;
+  UNLOCK(&g_jit.lock);
   return 0;
 }
 
