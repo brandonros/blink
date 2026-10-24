@@ -158,3 +158,20 @@ static AMD64 ELF and run inside the rootfs in each mode; both currently print
 `epoll_create1: Function not implemented` and exit 1. The later checks cover
 CLOEXEC, socket readiness, event data, and removal, for validating a future
 implementation. No epoll compatibility patch is included yet.
+
+## CPU enumeration through procfs
+
+`tool/proc_stat_probe.c` is an opt-in Linux guest probe for VFS builds. Compile
+it as a static x86-64 Linux executable, place it in the guest rootfs, and run
+it with `BLINK_PREFIX=/path/to/rootfs o/blink/blink -jm /tmp/proc_stat_probe`
+and again with `-m`. It checks CPU rows, partial reads, pread preserving the
+sequential position, EOF and rewind. The old VFS lacks `/proc/stat`; the patched
+macOS build reports all 10 host CPUs and passes both modes.
+
+On macOS, `/proc/stat` now supplies aggregate and per-CPU user, nice, system
+and idle times from Mach, converted to Linux USER_HZ. Unsupported accounting
+categories are zero; other Linux stat rows are not synthesized. Linux hosts
+read their native `/proc/stat`. Other host implementations remain unsupported.
+With the separate epoll/eventfd prototype, Node 22.23.4's `os.cpus()` now returns
+10 entries instead of an empty list. Model and frequency remain unknown because
+`/proc/cpuinfo` and CPU-frequency sysfs files are not implemented.

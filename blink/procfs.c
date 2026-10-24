@@ -22,6 +22,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/processor_info.h>
+#endif
+
 #include "blink/atomic.h"
 #include "blink/errno.h"
 #include "blink/log.h"
@@ -97,6 +102,7 @@ enum {
   PROCFS_SELF_INO,
   PROCFS_SYS_INO,
   PROCFS_UPTIME_INO,
+  PROCFS_STAT_INO,
 
   PROCFS_FIRST_PID_INO
 };
@@ -109,6 +115,7 @@ enum {
   PROCFS_SELF_TYPE,
   PROCFS_SYS_TYPE,
   PROCFS_UPTIME_TYPE,
+  PROCFS_STAT_TYPE,
 
   PROCFS_PIDDIR_TYPE,
   PROCFS_PIDDIR_EXE_TYPE,
@@ -124,6 +131,7 @@ static ssize_t ProcfsSelfReadlink(struct VfsInfo *, char **);
 static ssize_t ProcfsToSelfReadlink(struct VfsInfo *, char **);
 static int ProcfsMeminfoRead(struct VfsInfo *, struct ProcfsOpenFile *);
 static int ProcfsUptimeRead(struct VfsInfo *, struct ProcfsOpenFile *);
+static int ProcfsStatRead(struct VfsInfo *, struct ProcfsOpenFile *);
 static int ProcfsFilesystemsRead(struct VfsInfo *, struct ProcfsOpenFile *);
 
 static int ProcfsPiddirReaddir(struct VfsInfo *, struct dirent *);
@@ -149,6 +157,8 @@ static struct ProcfsInfo g_defaultinfos[] = {
                          .readlink = ProcfsSelfReadlink},
     [PROCFS_SYS_INO] = {PROCFS_SYS_INO, S_IFDIR | 0555, 0, 0, PROCFS_SYS_TYPE,
                         "sys"},
+    [PROCFS_STAT_INO] = {PROCFS_STAT_INO, S_IFREG | 0444, 0, 0,
+                          PROCFS_STAT_TYPE, "stat", .read = ProcfsStatRead},
     [PROCFS_UPTIME_INO] = {PROCFS_UPTIME_INO, S_IFREG | 0444, 0, 0,
                            PROCFS_UPTIME_TYPE, "uptime",
                            .read = ProcfsUptimeRead},
@@ -1150,6 +1160,79 @@ static ssize_t ProcfsPiddirRootReadlink(struct VfsInfo *info, char **buf) {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+
+// Expose host CPU accounting in Linux USER_HZ (100 ticks per second).
+// Darwin has no counterparts for Linux iowait, irq, softirq or steal time.
+static int ProcfsStatRead(struct VfsInfo *info,
+                          struct ProcfsOpenFile *openfile) {
+#ifdef __linux__
+  int fd, saved;
+  ssize_t n;
+  if ((fd = open("/proc/stat", O_RDONLY)) == -1) return -1;
+  n = pread(fd, openfile->readbuf, sizeof(openfile->readbuf), openfile->index);
+  saved = errno;
+  close(fd);
+  if (n == -1) {
+    errno = saved;
+    return -1;
+  }
+  if (n) {
+    openfile->index += n;
+    openfile->readbufstart = 0;
+    openfile->readbufend = n;
+    return 0;
+  }
+#elif defined(__APPLE__)
+  natural_t count;
+  processor_info_array_t data;
+  mach_msg_type_number_t size;
+  mach_port_t host;
+  kern_return_t rc;
+  unsigned long long ticks[CPU_STATE_MAX] = {0};
+  size_t first, last, i, j;
+  long hz;
+  char name[32];
+  hz = sysconf(_SC_CLK_TCK);
+  if (hz <= 0) return einval();
+  host = mach_host_self();
+  rc = host_processor_info(host, PROCESSOR_CPU_LOAD_INFO, &count, &data, &size);
+  mach_port_deallocate(mach_task_self(), host);
+  if (rc != KERN_SUCCESS) {
+    errno = EIO;
+    return -1;
+  }
+  if (openfile->index <= count) {
+    first = openfile->index ? openfile->index - 1 : 0;
+    last = openfile->index ? openfile->index : count;
+    for (i = first; i < last; ++i) {
+      for (j = 0; j < CPU_STATE_MAX; ++j) {
+        ticks[j] += (unsigned int)data[i * CPU_STATE_MAX + j];
+      }
+    }
+    if (openfile->index) {
+      snprintf(name, sizeof(name), "cpu%zu", openfile->index - 1);
+    } else {
+      strcpy(name, "cpu");
+    }
+    openfile->readbufstart = 0;
+    openfile->readbufend = snprintf(
+        openfile->readbuf, sizeof(openfile->readbuf),
+        "%s %llu %llu %llu %llu 0 0 0 0 0 0\n", name,
+        ticks[CPU_STATE_USER] * 100 / hz, ticks[CPU_STATE_NICE] * 100 / hz,
+        ticks[CPU_STATE_SYSTEM] * 100 / hz, ticks[CPU_STATE_IDLE] * 100 / hz);
+    ++openfile->index;
+    vm_deallocate(mach_task_self(), (vm_address_t)data,
+                  size * sizeof(*data));
+    return 0;
+  }
+  vm_deallocate(mach_task_self(), (vm_address_t)data, size * sizeof(*data));
+#else
+  return enosys();
+#endif
+  openfile->readbufstart = sizeof(openfile->readbuf) + 1;
+  openfile->readbufend = sizeof(openfile->readbuf) + 1;
+  return 0;
+}
 
 static int ProcfsMeminfoRead(struct VfsInfo *info,
                              struct ProcfsOpenFile *openfile) {
