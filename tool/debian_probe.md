@@ -77,3 +77,16 @@ mremap(0x2000011ec000, 0x1800000, 0x1900000, 0x1, 0) -> -ENOMEM
 `apt-cache -o APT::Cache-Start=134217728 gencaches` succeeds with those indexes.
 Starting with a larger allocation bypasses this particular growth request; it
 does not add mremap support or establish package installation compatibility.
+
+APT then reached dependency resolution but failed its archive-directory space
+check: `statvfs (2: No such file or directory)`. `SysStatfs` was calling host
+`statfs` directly with a guest path, while `SysFstatfs` likewise bypassed VFS
+descriptor translation. Both now dispatch through VFS; host-backed files use
+the resolved host path or descriptor. Other filesystem implementations without
+these operations return ENOSYS.
+
+`test/func/statfs_vfs_test.c` creates a fresh guest directory and checks pathname,
+descriptor, symlink, missing-path, and invalid-descriptor behavior. Under a VFS
+root the old binary exits 2; the patched binary passes with `-m` and `-jm`.
+The VFS-disabled code path also passes a native compilation check. With the
+patch, APT gets past the space check and starts downloading the 50 dependencies.

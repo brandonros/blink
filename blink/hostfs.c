@@ -662,6 +662,17 @@ int HostfsStat(struct VfsInfo *parent, const char *name, struct stat *st,
   return ret;
 }
 
+static int HostfsStatfs(struct VfsInfo *info, HostStatfs *st) {
+  char path[VFS_PATH_MAX];
+  if (HostfsGetHostPath(info, path) == -1) return -1;
+  return HostStatfsPath(path, st);
+}
+
+static int HostfsFstatfs(struct VfsInfo *info, HostStatfs *st) {
+  struct HostfsInfo *hostinfo = (struct HostfsInfo *)info->data;
+  return HostStatfsFd(hostinfo->filefd, st);
+}
+
 int HostfsFstat(struct VfsInfo *info, struct stat *st) {
   struct HostfsInfo *hostinfo;
   int ret;
@@ -1952,6 +1963,8 @@ struct VfsSystem g_hostfs = {.name = "hostfs",
                                  .Access = HostfsAccess,
                                  .Stat = HostfsStat,
                                  .Fstat = HostfsFstat,
+                                 .Statfs = HostfsStatfs,
+                                 .Fstatfs = HostfsFstatfs,
                                  .Chmod = HostfsChmod,
                                  .Fchmod = HostfsFchmod,
                                  .Chown = HostfsChown,

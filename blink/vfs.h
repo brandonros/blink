@@ -17,6 +17,7 @@
 #include "blink/macros.h"
 #include "blink/overlays.h"
 #include "blink/preadv.h"
+#include "blink/statfs.h"
 #include "blink/thread.h"
 #include "blink/tsan.h"
 #include "blink/types.h"
@@ -56,6 +57,8 @@ struct VfsOps {
   int (*Access)(struct VfsInfo *, const char *, mode_t, int);
   int (*Stat)(struct VfsInfo *, const char *, struct stat *, int);
   int (*Fstat)(struct VfsInfo *, struct stat *);
+  int (*Statfs)(struct VfsInfo *, HostStatfs *);
+  int (*Fstatfs)(struct VfsInfo *, HostStatfs *);
   int (*Chmod)(struct VfsInfo *, const char *, mode_t, int);
   int (*Fchmod)(struct VfsInfo *, mode_t);
   int (*Chown)(struct VfsInfo *, const char *, uid_t, gid_t, int);
@@ -208,6 +211,8 @@ int VfsUtime(int, const char *, const struct timespec[2], int);
 int VfsFutime(int, const struct timespec[2]);
 int VfsFchown(int, uid_t, gid_t);
 int VfsFstat(int, struct stat *);
+int VfsStatfs(const char *, HostStatfs *);
+int VfsFstatfs(int, HostStatfs *);
 int VfsFtruncate(int, off_t);
 int VfsClose(int);
 ssize_t VfsRead(int, void *, size_t);
@@ -312,6 +317,8 @@ ssize_t VfsPathBuild(struct VfsInfo *, struct VfsInfo *, bool,
 #define VfsFchmod      fchmod
 #define VfsFutime      futimens
 #define VfsFstat       fstat
+#define VfsStatfs      HostStatfsPath
+#define VfsFstatfs     HostStatfsFd
 #define VfsFtruncate   ftruncate
 #define VfsClose       close
 #define VfsRead        read
@@ -390,6 +397,8 @@ ssize_t VfsPathBuild(struct VfsInfo *, struct VfsInfo *, bool,
 #define VfsFchmod      fchmod
 #define VfsFutime      futimens
 #define VfsFstat       fstat
+#define VfsStatfs      HostStatfsPath
+#define VfsFstatfs     HostStatfsFd
 #define VfsFtruncate   ftruncate
 #define VfsClose       close
 #define VfsRead        read

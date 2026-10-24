@@ -1466,6 +1466,27 @@ int VfsFutime(int fd, const struct timespec times[2]) {
   return ret;
 }
 
+int VfsStatfs(const char *path, HostStatfs *st) {
+  struct VfsInfo *info;
+  int rc;
+  if (!path || !st) return efault();
+  if (!*path) return enoent();
+  if (VfsTraverse(path, &info, true) == -1) return -1;
+  rc = info->device->ops->Statfs ? info->device->ops->Statfs(info, st) : enosys();
+  unassert(!VfsFreeInfo(info));
+  return rc;
+}
+
+int VfsFstatfs(int fd, HostStatfs *st) {
+  struct VfsInfo *info;
+  int rc;
+  if (!st) return efault();
+  if (VfsGetFd(fd, &info) == -1) return -1;
+  rc = info->device->ops->Fstatfs ? info->device->ops->Fstatfs(info, st) : enosys();
+  unassert(!VfsFreeInfo(info));
+  return rc;
+}
+
 int VfsFstat(int fd, struct stat *st) {
   struct VfsInfo *info;
   int ret;
