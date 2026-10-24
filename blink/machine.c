@@ -2093,6 +2093,7 @@ nexgen32e_f GetOp(long op) {
       XLAT(0x237, OpPcmpgtq);
       XLAT(0x22a, OpMovntdqaVdqMdq);
       XLAT(0x229, OpPcmpeqq);
+      XLAT(0x228, OpPmuldq);
       XLAT(0x22b, OpPackusdw);
       XLAT(0x238, OpPminmax);
       XLAT(0x239, OpPminmax);
@@ -2103,6 +2104,7 @@ nexgen32e_f GetOp(long op) {
       XLAT(0x23e, OpPminmax);
       XLAT(0x23f, OpPminmax);
       XLAT(0x240, OpSsePmulld);
+      XLAT(0x241, OpPhminposuw);
       XLAT(0x2f0, Op2f01);
       XLAT(0x2f1, Op2f01);
       XLAT(0x2f5, Op2f5);
@@ -2121,6 +2123,7 @@ nexgen32e_f GetOp(long op) {
       XLAT(0x316, OpPextrdEdqpVdqIb);
       XLAT(0x317, OpExtractpsEdVpsIb);
       XLAT(0x320, OpPinsrbVdqEdIb);
+      XLAT(0x321, OpInsertps);
       XLAT(0x322, OpPinsrdVdqEdqpIb);
       XLAT(0x344, OpSsePclmulqdq);
       XLAT(0x360, OpPcmpstr);

@@ -209,6 +209,60 @@ void OpPinsrdVdqEdqpIb(P) {
   IGNORE_RACES_END();
 }
 
+void OpPhminposuw(P) {
+  unsigned i, index, minimum, value;
+  u8 source[16];
+  if (!Osz(rde) || Rep(rde)) return OpUd(A);
+  IGNORE_RACES_START();
+  memcpy(source, GetModrmRegisterXmmPointerRead16(A), 16);
+  IGNORE_RACES_END();
+  minimum = Get16(source);
+  index = 0;
+  for (i = 1; i < 8; ++i) {
+    if ((value = Get16(source + i * 2)) < minimum) {
+      minimum = value;
+      index = i;
+    }
+  }
+  memset(XmmRexrReg(m, rde), 0, 16);
+  Put16(XmmRexrReg(m, rde), minimum);
+  Put16(XmmRexrReg(m, rde) + 2, index);
+}
+
+void OpInsertps(P) {
+  unsigned i;
+  u32 value;
+  u8 result[16];
+  if (!Osz(rde) || Rep(rde)) return OpUd(A);
+  IGNORE_RACES_START();
+  memcpy(result, XmmRexrReg(m, rde), 16);
+  if (IsModrmRegister(rde)) {
+    value = Get32(XmmRexbRm(m, rde) + ((uimm0 >> 6) & 3) * 4);
+  } else {
+    value = Get32(GetModrmRegisterXmmPointerRead4(A));
+  }
+  IGNORE_RACES_END();
+  Put32(result + ((uimm0 >> 4) & 3) * 4, value);
+  for (i = 0; i < 4; ++i) {
+    if (uimm0 & (1 << i)) Put32(result + i * 4, 0);
+  }
+  memcpy(XmmRexrReg(m, rde), result, 16);
+}
+
+void OpPmuldq(P) {
+  unsigned i;
+  u8 left[16], right[16];
+  if (!Osz(rde) || Rep(rde)) return OpUd(A);
+  IGNORE_RACES_START();
+  memcpy(left, XmmRexrReg(m, rde), 16);
+  memcpy(right, GetModrmRegisterXmmPointerRead16(A), 16);
+  IGNORE_RACES_END();
+  for (i = 0; i < 16; i += 8) {
+    Put64(XmmRexrReg(m, rde) + i,
+          (i64)(i32)Get32(left + i) * (i64)(i32)Get32(right + i));
+  }
+}
+
 void OpPcmpeqq(P) {
   unsigned i;
   u8 left[16], right[16];

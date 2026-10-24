@@ -573,6 +573,7 @@ const char *DescribeMopcode(int code) {
     XLAT(0x235, "OpPmovx");
     XLAT(0x22b, "OpPackusdw");
     XLAT(0x229, "OpPcmpeqq");
+    XLAT(0x228, "OpPmuldq");
     XLAT(0x237, "OpPcmpgtq");
     XLAT(0x238, "OpPminmax");
     XLAT(0x239, "OpPminmax");
@@ -582,6 +583,7 @@ const char *DescribeMopcode(int code) {
     XLAT(0x23d, "OpPminmax");
     XLAT(0x23e, "OpPminmax");
     XLAT(0x23f, "OpPminmax");
+    XLAT(0x241, "OpPhminposuw");
     XLAT(0x308, "OpRound");
     XLAT(0x309, "OpRound");
     XLAT(0x30a, "OpRound");
@@ -591,6 +593,7 @@ const char *DescribeMopcode(int code) {
     XLAT(0x316, "OpPextrdEdqpVdqIb");
     XLAT(0x317, "OpExtractpsEdVpsIb");
     XLAT(0x320, "OpPinsrbVdqEdIb");
+    XLAT(0x321, "OpInsertps");
     XLAT(0x322, "OpPinsrdVdqEdqpIb");
     XLAT(0x360, "OpPcmpstr");
     XLAT(0x361, "OpPcmpstr");
