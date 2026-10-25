@@ -1,5 +1,7 @@
 [workspace]
 resolver = "2"
+# The pinned CI fixture downloader is a separate repository and Cargo package.
+exclude = ["work/builder"]
 members = [
     "rust/blink-core",
     "rust/blink-host",
