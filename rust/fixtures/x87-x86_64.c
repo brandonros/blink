@@ -1,28 +1,28 @@
 /* Native x87 result and status oracle; explicit ten-byte extended values. */
 static long call(long n,long a,long b,long c) {long r;__asm__ volatile("syscall":"=a"(r):"a"(n),"D"(a),"S"(b),"d"(c):"rcx","r11","memory");return r;}
-static const unsigned long values[]={0,0x8000000000000000ul,0x3ff0000000000000ul,0xbff0000000000000ul,0x3fd5555555555555ul,0x7ff0000000000000ul,0xfff0000000000000ul,0x7ff8000000000123ul,0xfff0000000000123ul,1,0x0010000000000000ul,0x7feffffffffffffful,0x3ca0000000000000ul};
+static const unsigned long values[]={0,0x8000000000000000ul,0x3ff0000000000000ul,0xbff0000000000000ul,0x3fd5555555555555ul,0x7ff0000000000000ul,0xfff0000000000000ul,0x7ff8000000000123ul,0xfff0000000000123ul,1,0x0010000000000000ul,0x7feffffffffffffful,0x3ca0000000000000ul,0,0,0,0,0,0,0,0};
 struct extended {unsigned long fraction;unsigned short exponent;} __attribute__((packed));
 static const struct extended extended[]={
 {0,0},{0,0x8000},{0x8000000000000000ul,0x3fff},{0x8000000000000000ul,0xbfff},
 {0xaaaaaaaaaaaaaaaaul,0x3ffd},{0x8000000000000000ul,0x7fff},{0x8000000000000000ul,0xffff},
 {0xc000000000000123ul,0x7fff},{0x8000000000000123ul,0xffff},{1,0},{0x8000000000000000ul,1},
-{0xfffffffffffffffful,0x7ffe},{0x8000000000000000ul,0x3fbf}};
+{0xfffffffffffffffful,0x7ffe},{0x8000000000000000ul,0x3fbf},{1,1},{0,0x7fff},{0x7ffffffffffffffful,0x3fff},{0x8000000000000000ul,0},{0xfffffffffffffffful,0},{0x7ffffffffffffffful,0},{0,0x4000},{0,0xffff}};
 struct record {unsigned long a,b;unsigned char result[10];unsigned short status,control,op;};
 #define OPERATE(instruction) __asm__ volatile("fninit; fldcw %4; fldl %2; fldl %3; " instruction "; fnstsw %1; fstpt %0; fninit" :"=m"(r.result),"=m"(r.status):"m"(r.a),"m"(r.b),"m"(r.control):"st","st(1)","rax","cc","memory")
 #define OPERATE80(instruction) __asm__ volatile("fninit; fldcw %4; fldt %2; fldt %3; " instruction "; fnstsw %1; fstpt %0; fninit" :"=m"(r.result),"=m"(r.status):"m"(left),"m"(right),"m"(r.control):"st","st(1)","rax","cc","memory")
 #define STORE80(instruction) __asm__ volatile("fninit; fldcw %4; fldt %2; fldt %3; " instruction " %0; fnstsw %1; fninit" :"=m"(r.result),"=m"(r.status):"m"(left),"m"(right),"m"(r.control):"st","st(1)","rax","cc","memory")
 #define COMPARE80(instruction) do { __asm__ volatile("fninit; fldcw %4; fldt %2; fldt %3; " instruction "; pushfq; popq %0; fnstsw %1; fninit" :"=m"(r.result),"=m"(r.status):"m"(left),"m"(right),"m"(r.control):"st","st(1)","memory","cc"); r.result[0]&=0xd5;r.result[1]&=8;for(int n=2;n<10;n++)r.result[n]=0; } while(0)
 __attribute__((noreturn)) void _start(void) {
-    for(unsigned op=0;op<26;op++) for(unsigned mode=0;mode<12;mode++) for(unsigned pair=0;pair<169+256;pair++) {
+    for(unsigned op=0;op<26;op++) for(unsigned mode=0;mode<12;mode++) for(unsigned pair=0;pair<441+256;pair++) {
         struct record r={0};r.op=op;r.control=0x7f|((mode<4?0:mode<8?2:3)<<8)|((mode&3)<<10);
-        if(pair<169) {r.a=values[pair/13];r.b=values[pair%13];}
+        if(pair<441) {r.a=values[pair/21];r.b=values[pair%21];}
         else {
-            unsigned long seed=(pair-168)*0x9e3779b97f4a7c15ul;
+            unsigned long seed=(pair-440)*0x9e3779b97f4a7c15ul;
             seed ^= seed>>12; seed ^= seed<<25; seed ^= seed>>27;r.a=seed*0x2545f4914f6cdd1dul;
             seed ^= seed>>12; seed ^= seed<<25; seed ^= seed>>27;r.b=seed*0x2545f4914f6cdd1dul;
         }
         struct extended left,right;
-        if(pair<169) {left=extended[pair/13];right=extended[pair%13];}
+        if(pair<441) {left=extended[pair/21];right=extended[pair%21];}
         else {left.fraction=r.a|0x8000000000000000ul;left.exponent=(r.b>>32)&0xffff;right.fraction=r.b|0x8000000000000000ul;right.exponent=(r.a>>32)&0xffff;}
         switch(op) {
         case 8:OPERATE80("fcom %%st(1)");break;
@@ -90,6 +90,22 @@ __attribute__((noreturn)) void _start(void) {
         for(int n=0;n<9;n++){unsigned lo=remaining%10;remaining/=10;unsigned hi=remaining%10;remaining/=10;bcd[n]=lo|(hi<<4);}bcd[9]=sign?128:0;
         struct record r={0};r.a=number;r.b=sign;r.op=60;r.control=0x37f;
         __asm__ volatile("fninit; fbld %2; fnstsw %1; fstpt %0":"=m"(r.result),"=m"(r.status):"m"(bcd):"st","memory");
+        if(call(1,1,(long)&r,sizeof r)!=sizeof r) {call(231,1,0,0);__builtin_unreachable();}
+    }
+    static const unsigned long integers[]={0,1,-1ul,32767,32768,0x7fffffff,0x80000000,0xabcdef1234567890};
+    for(unsigned op=0;op<4;op++) for(unsigned mode=0;mode<12;mode++) for(unsigned sample=0;sample<13;sample++) for(unsigned i=0;i<8;i++) {
+        struct record r={0};r.op=61+op;r.a=integers[i];r.b=sample;
+        r.control=0x7f|((mode<4?0:mode<8?2:3)<<8)|((mode&3)<<10);
+        struct extended value=extended[sample];
+#define ICOMPARE(ins) __asm__ volatile("fninit; fldcw %4; fldz; fldt %3; " ins " %2; fnstsw %1; fstpt %0":"=m"(r.result),"=m"(r.status):"m"(r.a),"m"(value),"m"(r.control):"st","st(1)","memory")
+        switch(op){case 0:ICOMPARE("ficoms");break;case 1:ICOMPARE("ficoml");break;case 2:ICOMPARE("ficomps");break;case 3:ICOMPARE("ficompl");break;}
+        if(call(1,1,(long)&r,sizeof r)!=sizeof r) {call(231,1,0,0);__builtin_unreachable();}
+    }
+    for(unsigned mode=0;mode<12;mode++) for(unsigned sign=0;sign<2;sign++) {
+        struct extended left={0xfffffffffffffffful,sign?0x8000:0},right={0x8000000000000000ul,0x3ffe};
+        struct record r={0};r.a=left.fraction;r.b=left.exponent;r.op=65;
+        r.control=0x7f|((mode<4?0:mode<8?2:3)<<8)|((mode&3)<<10);
+        OPERATE80("fmulp");
         if(call(1,1,(long)&r,sizeof r)!=sizeof r) {call(231,1,0,0);__builtin_unreachable();}
     }
     call(231,0,0,0);__builtin_unreachable();

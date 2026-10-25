@@ -141,6 +141,23 @@ fn square_root(bits: u128, control: u16) -> (u128, u16, bool) {
     (rounded | ((output_exp as u128) << 64), exceptions, up)
 }
 const INDEFINITE: u128 = 0xffff_c000_0000_0000_0000;
+fn unsupported_extended(bits: u128) -> bool {
+    ((bits >> 64) & 0x7fff) != 0 && bits & (1 << 63) == 0
+}
+fn denormal_extended(bits: u128) -> bool {
+    ((bits >> 64) & 0x7fff) == 0 && bits as u64 != 0
+}
+fn arithmetic_input(bits: u128, exceptions: &mut u16) -> Extended {
+    if unsupported_extended(bits) {
+        *exceptions |= 1;
+        Extended::from_bits(INDEFINITE)
+    } else {
+        if denormal_extended(bits) {
+            *exceptions |= 2;
+        }
+        Extended::from_bits(bits)
+    }
+}
 fn value_tag(bits: u128) -> u8 {
     let exponent = (bits >> 64) & 0x7fff;
     let fraction = bits as u64;
@@ -378,6 +395,8 @@ impl X86 {
                 | Op::FINCSTP
                 | Op::FDECSTP
                 | Op::FCOM
+                | Op::FICOM
+                | Op::FICOMP
                 | Op::FCOMP
                 | Op::FCOMPP
                 | Op::FUCOM
@@ -614,7 +633,14 @@ impl X86 {
                 let dst = a.ok_or_else(bad)?;
                 let mut exceptions = 0;
                 let bits = self.fpu.get(0, &mut exceptions);
-                let value = Extended::from_bits(bits);
+                let value = if unsupported_extended(bits)
+                    && !matches!(dst, Value::FloatStack(_) | Value::Memory { width: 10, .. })
+                {
+                    exceptions |= 1;
+                    Extended::from_bits(INDEFINITE)
+                } else {
+                    Extended::from_bits(bits)
+                };
                 let mut c1 = false;
                 let result = match dst {
                     Value::FloatStack(_) => bits,
@@ -665,6 +691,8 @@ impl X86 {
                 }
             }
             Op::FCOM
+            | Op::FICOM
+            | Op::FICOMP
             | Op::FCOMP
             | Op::FCOMPP
             | Op::FUCOM
@@ -676,16 +704,18 @@ impl X86 {
             | Op::FUCOMIP
             | Op::FTST => {
                 let mut exceptions = 0;
-                let left = Extended::from_bits(self.fpu.get(0, &mut exceptions));
+                let left_bits = self.fpu.get(0, &mut exceptions);
+                let left = arithmetic_input(left_bits, &mut exceptions);
                 let right = if op == Op::FTST {
                     Extended::ZERO
                 } else {
-                    Extended::from_bits(self.x87_read(
+                    let bits = self.x87_read(
                         memory,
                         b.or(a).unwrap_or(Value::FloatStack(1)),
-                        false,
+                        matches!(op, Op::FICOM | Op::FICOMP),
                         &mut exceptions,
-                    )?)
+                    )?;
+                    arithmetic_input(bits, &mut exceptions)
                 };
                 let quiet = matches!(
                     op,
@@ -719,6 +749,7 @@ impl X86 {
                     if matches!(
                         op,
                         Op::FCOMP
+                            | Op::FICOMP
                             | Op::FCOMPP
                             | Op::FUCOMP
                             | Op::FUCOMPP
@@ -820,11 +851,15 @@ impl X86 {
                     exceptions = 1;
                     INDEFINITE
                 } else {
-                    if x.is_denormal() || y.is_denormal() {
+                    if denormal_extended(left) || denormal_extended(right) {
                         exceptions |= 2;
                     }
                     if x.is_zero() || y.is_infinite() {
-                        left
+                        if denormal_extended(left) && left & (1 << 63) != 0 {
+                            left | (1 << 64)
+                        } else {
+                            left
+                        }
                     } else {
                         let normalize = |bits: u128| {
                             let mut fraction = bits as u64;
@@ -911,7 +946,7 @@ impl X86 {
                     };
                     chosen | (1 << 62)
                 } else {
-                    if x.is_denormal() || y.is_denormal() {
+                    if denormal_extended(left) || denormal_extended(right) {
                         exceptions |= 2;
                     }
                     if y.is_infinite() {
@@ -942,6 +977,14 @@ impl X86 {
                         let converted: rustc_apfloat::StatusAnd<Extended> =
                             scaled.convert_r(self.fpu.round(), &mut false);
                         exceptions |= flags(converted.status);
+                        // x87 detects tininess before rounding, including a
+                        // subnormal exact value that rounds up to minimum normal.
+                        if converted.status.contains(Status::INEXACT)
+                            && scaled.abs()
+                                < IeeeFloat::<Intermediate>::from_u128(1).value.scalbn(-16382)
+                        {
+                            exceptions |= 16;
+                        }
                         let widened: IeeeFloat<Intermediate> =
                             converted.value.convert(&mut false).value;
                         rounded_up = widened.abs() > scaled.abs();
@@ -978,7 +1021,8 @@ impl X86 {
             }
             Op::FRNDINT => {
                 let mut exceptions = 0;
-                let value = Extended::from_bits(self.fpu.get(0, &mut exceptions));
+                let bits = self.fpu.get(0, &mut exceptions);
+                let value = arithmetic_input(bits, &mut exceptions);
                 if value.is_denormal() {
                     exceptions |= 2;
                 }
@@ -1097,8 +1141,8 @@ impl X86 {
                 } else {
                     (left, right)
                 };
-                let x = Extended::from_bits(left);
-                let y = Extended::from_bits(right);
+                let x = arithmetic_input(left, &mut exceptions);
+                let y = arithmetic_input(right, &mut exceptions);
                 if x.is_denormal() || y.is_denormal() {
                     exceptions |= 2;
                 }
@@ -1115,7 +1159,18 @@ impl X86 {
                         0 => reduced::<IeeeFloat<Precision24>>(op, x, y, self.fpu.round()),
                         2 => reduced::<IeeeFloat<Precision53>>(op, x, y, self.fpu.round()),
                         3 => {
-                            let result = calculate(op, x, y, self.fpu.round());
+                            let mut result = calculate(op, x, y, self.fpu.round());
+                            if result.status.contains(Status::INEXACT)
+                                && result.value.abs() == Extended::smallest_normalized()
+                            {
+                                let wx: IeeeFloat<Intermediate> = x.convert(&mut false).value;
+                                let wy: IeeeFloat<Intermediate> = y.convert(&mut false).value;
+                                if calculate(op, wx, wy, Round::TowardZero).value.abs()
+                                    < IeeeFloat::<Intermediate>::from_u128(1).value.scalbn(-16382)
+                                {
+                                    result.status |= Status::UNDERFLOW;
+                                }
+                            }
                             let up = result.status.contains(Status::INEXACT)
                                 && result.value.abs()
                                     > calculate(op, x, y, Round::TowardZero).value.abs();
@@ -1143,7 +1198,10 @@ impl X86 {
                     }
                 }
                 let mut bits = result.value.to_bits();
-                if exceptions & 0x40 != 0 {
+                if exceptions & 0x40 != 0
+                    || unsupported_extended(left)
+                    || unsupported_extended(right)
+                {
                     bits = INDEFINITE;
                 } else if x.is_nan() && y.is_nan() {
                     // x87 prefers a quiet NaN to a signaling NaN, then the

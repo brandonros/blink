@@ -290,7 +290,7 @@ loads/stores, and stack operations. Signal handlers start with a fresh x87 state
 sigreturn restores the saved stack and control word. An unmasked exception
 preserves the destination/stack and faults on the next waiting instruction.
 
-`python3 rust/x87-regressions.py` compares 184,046 native AMD64 result/status records,
+`python3 rust/x87-regressions.py` compares 273,926 native AMD64 result/status records,
 including 80-bit extrema, NaNs, denormals, all three precision controls, four rounding modes, comparisons and
 conversions. Tests also cover a ten-byte source at a page boundary, masked stack
 overflow, deferred faults, and signal-frame preservation. The adapter handles
@@ -479,7 +479,7 @@ ZF-only updates and CX16 alignment checks. CPUID advertises CX8/CX16 after
 native comparisons and fault-state tests; CI replays the fixture on Darwin arm64.
 
 FSQRT uses a 128-bit integer radicand and exact remainder, rounding directly
-to the selected 24/53/64-bit significand. The x87 oracle now compares 184,046
+to the selected 24/53/64-bit significand. The x87 oracle now compares 273,926
 records, including 49,248 extra square-root cases with extended-format edge
 encodings, exponent extremes, random significands and all rounding/precision
 controls. Empty-stack and deferred unmasked-invalid behavior have focused tests.
@@ -542,3 +542,10 @@ architecture decoders' disabled serde features. Cargo.lock pins transitive crate
 `worker-smoke.py` checks persistent filesystem/metadata, isolated contexts,
 nonzero-exit and timeout recovery, per-run credentials, protocol isolation and
 explicit close. It runs on Linux and Apple Silicon CI.
+
+Integer-memory FICOM/FICOMP support signed 16/32-bit operands and optional
+stack pops. The expanded x87 oracle includes pseudo-denormals and unsupported
+80-bit encodings across arithmetic, comparisons and stores. Unsupported arithmetic
+encodings produce indefinite results with invalid-operation status; pseudo-denormals
+raise denormal status and normalize where the operation produces a new value.
+Focused boundary cases check tininess before rounding into minimum normal.
