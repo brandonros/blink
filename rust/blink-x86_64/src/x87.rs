@@ -242,7 +242,15 @@ impl X86 {
         };
         if !matches!(
             op,
-            Op::FNINIT
+            Op::FCMOVB
+                | Op::FCMOVBE
+                | Op::FCMOVE
+                | Op::FCMOVNB
+                | Op::FCMOVNBE
+                | Op::FCMOVNE
+                | Op::FCMOVNU
+                | Op::FCMOVU
+                | Op::FNINIT
                 | Op::FNCLEX
                 | Op::FNSTCW
                 | Op::FNSTSW
@@ -485,6 +493,39 @@ impl X86 {
                     self.fpu.set(0, result.value.to_bits());
                 }
             }
+            Op::FCMOVB
+            | Op::FCMOVBE
+            | Op::FCMOVE
+            | Op::FCMOVNB
+            | Op::FCMOVNBE
+            | Op::FCMOVNE
+            | Op::FCMOVNU
+            | Op::FCMOVU => {
+                let Value::FloatStack(n) = b.ok_or_else(bad)? else {
+                    return Err(bad());
+                };
+                let condition = match op {
+                    Op::FCMOVB => self.flags & 1 != 0,
+                    Op::FCMOVBE => self.flags & 65 != 0,
+                    Op::FCMOVE => self.flags & 64 != 0,
+                    Op::FCMOVNB => self.flags & 1 == 0,
+                    Op::FCMOVNBE => self.flags & 65 == 0,
+                    Op::FCMOVNE => self.flags & 64 == 0,
+                    Op::FCMOVNU => self.flags & 4 == 0,
+                    _ => self.flags & 4 != 0,
+                };
+                let mut exceptions = 0;
+                self.fpu.get(0, &mut exceptions);
+                let value = self.fpu.get(n, &mut exceptions);
+                self.fpu.status &= !0x200;
+                if self.fpu.exception(exceptions) {
+                    if exceptions != 0 {
+                        self.fpu.set(0, INDEFINITE);
+                    } else if condition {
+                        self.fpu.set(0, value);
+                    }
+                }
+            }
             Op::FXCH => {
                 let mut exceptions = 0;
                 let Value::FloatStack(n) = b.or(a).ok_or_else(bad)? else {
@@ -505,7 +546,9 @@ impl X86 {
                 if self.fpu.exception(exceptions) {
                     self.fpu.set(
                         0,
-                        if op == Op::FCHS {
+                        if exceptions & 0x40 != 0 {
+                            INDEFINITE
+                        } else if op == Op::FCHS {
                             bits ^ (1 << 79)
                         } else {
                             bits & !(1 << 79)
@@ -601,7 +644,9 @@ impl X86 {
                     }
                 }
                 let mut bits = result.value.to_bits();
-                if x.is_nan() && y.is_nan() {
+                if exceptions & 0x40 != 0 {
+                    bits = INDEFINITE;
+                } else if x.is_nan() && y.is_nan() {
                     // x87 prefers a quiet NaN to a signaling NaN, then the
                     // larger significand, with positive sign breaking ties.
                     let chosen = if x.is_signaling() != y.is_signaling() {

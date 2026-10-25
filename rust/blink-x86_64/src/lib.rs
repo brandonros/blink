@@ -1076,6 +1076,10 @@ impl Cpu for X86 {
                     self.regs[3] = u32::from_le_bytes(*b"Blin") as u64;
                     self.regs[2] = u32::from_le_bytes(*b"kRus") as u64;
                     self.regs[1] = u32::from_le_bytes(*b"tCPU") as u64;
+                } else if leaf == 1 {
+                    // Implemented instruction groups, qualified by native oracles;
+                    // see rust/CPU-FEATURES.md. Do not infer bits from the decoder.
+                    self.regs[2] = (1 << 15) | (1 << 23) | (1 << 24) | (1 << 25) | (1 << 26);
                 }
             }
             Op::LAHF => self.regs[0] = (self.regs[0] & !0xff00) | ((self.flags & 0xd5 | 2) << 8),
@@ -1423,6 +1427,19 @@ mod sse_memory_tests {
             cpu.step(&mut memory),
             Err(Error::MemoryFault { address: 12288, .. })
         ));
+    }
+    #[test]
+    fn cpuid_advertises_only_qualified_simd_groups() {
+        let (mut cpu, mut memory) = run(&[0x0f, 0xa2], 0);
+        cpu.regs[0] = 1;
+        cpu.step(&mut memory).unwrap();
+        assert_eq!(cpu.regs[2], 0x07808000);
+        assert_eq!(cpu.regs[1], 0); // no SSE3/SSSE3/SSE4/AVX
+        cpu.rip = 4096;
+        cpu.regs[0] = 7;
+        cpu.regs[1] = 0;
+        cpu.step(&mut memory).unwrap();
+        assert_eq!(&cpu.regs[..4], &[0; 4]); // no BMI/AVX2
     }
     #[test]
     fn insert_word_reads_only_two_bytes_at_page_end() {

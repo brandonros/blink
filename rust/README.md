@@ -85,7 +85,7 @@ Implemented slices:
 - Bounded capture, timeout/cancellation (including blocked pipes/futexes), and
   explicit exit/signal/timeout/cancel/budget outcomes separate from engine errors.
 
-CPUID exposes an identity with no optional feature bits. Unsupported opcodes,
+CPUID exposes the qualified CMOV/MMX/FXSR/SSE/SSE2 groups described in [CPU-FEATURES.md](CPU-FEATURES.md). Unsupported opcodes,
 syscalls, and flags are explicit errors, not silent approximations or fallback.
 The first actual C translation is the integer signal context layout/save order;
 its source retains upstream ISC notices.
@@ -300,7 +300,7 @@ this native-generated fixture on Apple Silicon as well as the SSE fixture.
 This is partial x87 support. Transcendentals, square root,
 legacy environment/save-state instructions and complete
 unsupported-encoding behavior remain; unsupported operations fail explicitly.
-CPUID still does not advertise complete FPU/SSE2 support. No Node/Bun workload or
+The complete x87 FPU feature remains unadvertised. No Node/Bun workload or
 new agent-platform checkpoint is established by these instruction tests.
 
 The 24/53-bit x87 arithmetic modes use a 111-bit intermediate with a wider
@@ -323,8 +323,9 @@ by linux-oci-builder; `node-smoke.py --root ROOT` runs the version gate. The ima
 manifest is `sha256:025b8e975a61d94e33abeafaad1255ef44e4898cf1a1b6446860009c72e6d284`;
 the Node executable SHA-256 is `5a92a46a1d8279fec6776e3123ca22e26a6fddbb7cf1b55e019dbb38eea8ff26`.
 This is not yet a JavaScript execution gate: the current `--jitless -p '1 + 2'`
-probe starts six guest threads and reaches V8's explicit SSE2 feature check;
-CPUID deliberately does not yet advertise that incomplete feature group. CLI `--max-memory BYTES` and `--max-image-size BYTES`
+probe has progressed through thread startup and SIMD/conditional-move feature checks,
+and currently stops at madvise(MADV_DONTFORK).
+The feature qualifications are documented in [CPU-FEATURES.md](CPU-FEATURES.md). CLI `--max-memory BYTES` and `--max-image-size BYTES`
 expose existing runtime limits for this 130 MB executable.
 
 Startup exercises word/dword packed shifts, saturating packing, lane shuffles,
@@ -374,7 +375,7 @@ rounded averages, saturated addition/subtraction, word min/max, lane insertion
 and extraction, sign-bit masks, unpacking and non-temporal stores. The 57,344
 native records compare full result registers and preserved flags. Memory tests
 cover aligned-only operand faults and a two-byte PINSRW at a page boundary.
-This still does not establish full SSE2/MMX coverage or enable their CPUID bits.
+The later MMX, reciprocal and memory gates complete the baseline SIMD qualification; see [CPU-FEATURES.md](CPU-FEATURES.md).
 
 
 MMX registers alias the physical guest x87 register storage. Successful MMX
@@ -383,7 +384,7 @@ unmasked x87 exceptions still fault before MMX executes. Native FXSAVE compariso
 check tag/TOP transitions and the 80-bit register aliases. The packed suite now
 includes 62 MMX cases; six MMX/float conversions extend the floating-point suite.
 Page-end conversion and fault tests check access widths and unchanged state.
-CPUID feature bits remain conservative while the remaining SSE/MMX gaps close.
+Feature advertisement follows the documented instruction groups and native gates.
 
 
 RCPSS/RCPPS and RSQRTSS/RSQRTPS use host-independent software arithmetic.
@@ -401,3 +402,10 @@ CLFLUSH checks the addressed guest byte while requiring no host cache operation;
 PAUSE and memory fences preserve state under the sequential guest interpreter.
 Native tests retain the distinction between unaligned MOVNTQ (accepted) and
 aligned-only XMM streaming stores.
+
+
+FCMOVcc and x87 empty-stack behavior have a separate 4,608-record native gate.
+It includes both taken and untaken conditional moves, signaling/quiet NaNs and
+empty source/destination slots. Empty-stack arithmetic and sign operations
+produce the negative indefinite value even when another NaN is available.
+CMOV advertisement covers the integer and x87 forms together.
