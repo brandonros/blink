@@ -13,8 +13,8 @@ struct record {unsigned long a,b;unsigned char result[10];unsigned short status,
 #define STORE80(instruction) __asm__ volatile("fninit; fldcw %4; fldt %2; fldt %3; " instruction " %0; fnstsw %1; fninit" :"=m"(r.result),"=m"(r.status):"m"(left),"m"(right),"m"(r.control):"st","st(1)","memory")
 #define COMPARE80(instruction) do { __asm__ volatile("fninit; fldcw %4; fldt %2; fldt %3; " instruction "; pushfq; popq %0; fnstsw %1; fninit" :"=m"(r.result),"=m"(r.status):"m"(left),"m"(right),"m"(r.control):"st","st(1)","memory","cc"); r.result[0]&=0xd5;r.result[1]&=8;for(int n=2;n<10;n++)r.result[n]=0; } while(0)
 __attribute__((noreturn)) void _start(void) {
-    for(unsigned op=0;op<19;op++) for(unsigned mode=0;mode<4;mode++) for(unsigned pair=0;pair<169+256;pair++) {
-        struct record r={0};r.op=op;r.control=0x37f|(mode<<10);
+    for(unsigned op=0;op<19;op++) for(unsigned mode=0;mode<12;mode++) for(unsigned pair=0;pair<169+256;pair++) {
+        struct record r={0};r.op=op;r.control=0x7f|((mode<4?0:mode<8?2:3)<<8)|((mode&3)<<10);
         if(pair<169) {r.a=values[pair/13];r.b=values[pair%13];}
         else {
             unsigned long seed=(pair-168)*0x9e3779b97f4a7c15ul;
@@ -37,6 +37,15 @@ __attribute__((noreturn)) void _start(void) {
         case 17:STORE80("fistps");break;
         case 18:STORE80("fisttpq");break;
         case 4:OPERATE80("faddp");break;case 5:OPERATE80("fsubp");break;case 6:OPERATE80("fmulp");break;case 7:OPERATE80("fdivp");break;case 0:OPERATE("faddp");break;case 1:OPERATE("fsubp");break;case 2:OPERATE("fmulp");break;case 3:OPERATE("fdivp");break;}
+        if(call(1,1,(long)&r,sizeof r)!=sizeof r) {call(231,1,0,0);__builtin_unreachable();}
+    }
+    /* Midpoints plus a tiny term expose double rounding through 64/111 bits. */
+    for(unsigned mode=0;mode<12;mode++) for(unsigned precision=0;precision<2;precision++) for(unsigned op=0;op<2;op++) {
+        struct extended left={0x8000000000000000ul | (1ul<<(precision?10:39)),0x3fff};
+        struct extended right={0x8000000000000000ul,0x3fff-1000};
+        struct record r={0};r.a=left.fraction;r.b=right.exponent;r.op=19+op;
+        r.control=0x7f|((mode<4?0:mode<8?2:3)<<8)|((mode&3)<<10);
+        if(op==0) {OPERATE80("faddp");} else {OPERATE80("fsubp");}
         if(call(1,1,(long)&r,sizeof r)!=sizeof r) {call(231,1,0,0);__builtin_unreachable();}
     }
     call(231,0,0,0);__builtin_unreachable();

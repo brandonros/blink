@@ -17,6 +17,66 @@ fn calculate<F: Float>(op: Op, x: F, y: F, round: Round) -> rustc_apfloat::Statu
         _ => x.div_r(y, round),
     }
 }
+// A wider exponent covers the complete range of operations on two 80-bit
+// operands. Truncating to 111 bits and jamming discarded bits into the low bit
+// avoids double rounding when converting to the 24/53-bit precision controls.
+struct Intermediate;
+impl Semantics for Intermediate {
+    const BITS: usize = 128;
+    const EXP_BITS: usize = 17;
+}
+struct Precision24;
+impl Semantics for Precision24 {
+    const BITS: usize = 39;
+    const EXP_BITS: usize = 15;
+}
+struct Precision53;
+impl Semantics for Precision53 {
+    const BITS: usize = 68;
+    const EXP_BITS: usize = 15;
+}
+fn reduced<F>(
+    op: Op,
+    x: Extended,
+    y: Extended,
+    round: Round,
+) -> (rustc_apfloat::StatusAnd<Extended>, bool)
+where
+    IeeeFloat<Intermediate>: FloatConvert<F>,
+    F: Float + FloatConvert<Extended> + FloatConvert<IeeeFloat<Intermediate>>,
+{
+    let wx: IeeeFloat<Intermediate> = x.convert(&mut false).value;
+    let wy: IeeeFloat<Intermediate> = y.convert(&mut false).value;
+    let intermediate = calculate(op, wx, wy, Round::TowardZero);
+    let mut value = intermediate.value;
+    // Exact cancellation has a rounding-dependent zero sign.
+    if value.is_zero() && !intermediate.status.contains(Status::INEXACT) {
+        value = calculate(op, wx, wy, round).value;
+    }
+    if intermediate.status.contains(Status::INEXACT) {
+        value = IeeeFloat::<Intermediate>::from_bits(value.to_bits() | 1);
+    }
+    let converted: rustc_apfloat::StatusAnd<F> = value.convert_r(round, &mut false);
+    let mut status = converted.status | intermediate.status;
+    let result: Extended = converted.value.convert(&mut false).value;
+    if converted.value.abs() == F::largest()
+        && status.contains(Status::INEXACT)
+        && value.abs()
+            >= IeeeFloat::<Intermediate>::from_u128(1)
+                .value
+                .scalbn(F::MAX_EXP + 1)
+    {
+        status |= Status::OVERFLOW;
+    }
+    let widened: IeeeFloat<Intermediate> = converted.value.convert(&mut false).value;
+    (
+        rustc_apfloat::StatusAnd {
+            status,
+            value: result,
+        },
+        widened.abs() > value.abs(),
+    )
+}
 const INDEFINITE: u128 = 0xffff_c000_0000_0000_0000;
 #[derive(Clone)]
 pub(crate) struct Fpu {
@@ -446,11 +506,6 @@ impl X86 {
                 self.fpu.status &= !0x200;
             }
             _ => {
-                // Reduced-precision control needs independently tested rounding;
-                // do not silently compute those operations at extended precision.
-                if self.fpu.control & 0x300 != 0x300 {
-                    return Err(bad());
-                }
                 let dst = a.ok_or_else(bad)?;
                 let src = b.ok_or_else(bad)?;
                 let Value::FloatStack(n) = dst else {
@@ -480,7 +535,28 @@ impl X86 {
                 if x.is_denormal() || y.is_denormal() {
                     exceptions |= 2;
                 }
-                let result = calculate(op, x, y, self.fpu.round());
+                let (result, rounded_up) = if !x.is_finite()
+                    || !y.is_finite()
+                    || y.is_zero()
+                        && matches!(
+                            op,
+                            Op::FDIV | Op::FDIVP | Op::FDIVR | Op::FDIVRP | Op::FIDIV | Op::FIDIVR
+                        ) {
+                    (calculate(op, x, y, self.fpu.round()), false)
+                } else {
+                    match (self.fpu.control >> 8) & 3 {
+                        0 => reduced::<IeeeFloat<Precision24>>(op, x, y, self.fpu.round()),
+                        2 => reduced::<IeeeFloat<Precision53>>(op, x, y, self.fpu.round()),
+                        3 => {
+                            let result = calculate(op, x, y, self.fpu.round());
+                            let up = result.status.contains(Status::INEXACT)
+                                && result.value.abs()
+                                    > calculate(op, x, y, Round::TowardZero).value.abs();
+                            (result, up)
+                        }
+                        _ => return Err(bad()),
+                    }
+                };
                 exceptions |= flags(result.status);
                 if x.is_nan() || y.is_nan() || exceptions & 5 != 0 {
                     exceptions &= !2;
@@ -523,9 +599,7 @@ impl X86 {
                     bits = INDEFINITE;
                 }
                 self.fpu.status &= !0x200;
-                if result.status.contains(Status::INEXACT)
-                    && result.value.abs() > calculate(op, x, y, Round::TowardZero).value.abs()
-                {
+                if result.status.contains(Status::INEXACT) && rounded_up {
                     self.fpu.status |= 0x200;
                 }
                 if self.fpu.exception(exceptions) {

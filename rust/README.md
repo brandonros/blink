@@ -290,15 +290,21 @@ loads/stores, and stack operations. Signal handlers start with a fresh x87 state
 sigreturn restores the saved stack and control word. An unmasked exception
 preserves the destination/stack and faults on the next waiting instruction.
 
-`python3 rust/x87-regressions.py` compares 32,300 native AMD64 result/status records,
-including 80-bit extrema, NaNs, denormals, four rounding modes, comparisons and
+`python3 rust/x87-regressions.py` compares 96,948 native AMD64 result/status records,
+including 80-bit extrema, NaNs, denormals, all three precision controls, four rounding modes, comparisons and
 conversions. Tests also cover a ten-byte source at a page boundary, masked stack
 overflow, deferred faults, and signal-frame preservation. The adapter handles
 x87 NaN priority and the APFloat directed-overflow flag difference. CI replays
 this native-generated fixture on Apple Silicon as well as the SSE fixture.
 
-This is partial x87 support. Reduced-precision (24/53-bit) arithmetic control,
-transcendentals, square root, environment/save-state instructions and complete
+This is partial x87 support. Transcendentals, square root,
+environment/save-state instructions and complete
 unsupported-encoding behavior remain; unsupported operations fail explicitly.
 CPUID still does not advertise complete FPU/SSE2 support. No Node/Bun workload or
 new agent-platform checkpoint is established by these instruction tests.
+
+The 24/53-bit x87 arithmetic modes use a 111-bit intermediate with a wider
+exponent range. Discarded bits are retained through round-to-odd before final
+rounding, avoiding double rounding at a midpoint plus a very small term. Native
+fixtures include those cases and rounding-dependent signed zero after exact
+cancellation. The 64-bit precision path retains direct extended arithmetic.
