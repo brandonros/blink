@@ -189,7 +189,7 @@ in addition to the still-unimplemented guest Internet socket backend.
 
 ## Floating-point interpreter
 
-SSE scalar and packed single/double add, subtract, multiply, divide, minimum,
+SSE scalar and packed single/double add, subtract, multiply, divide, square root, minimum,
 maximum, comparisons, scalar integer conversions, and single/double conversions
 use pinned `rustc_apfloat` 0.2.3+llvm-462a31f5a5ab (Apache-2.0 WITH LLVM-exception).
 Arithmetic is software Rust, with no host floating-point mode changes or C
@@ -199,7 +199,7 @@ MXCSR and handlers start with the default control word. Synchronous fault
 handlers remain unsupported; an unmasked SIMD fault terminates the guest.
 
 `python3 rust/float-regressions.py` compares result bits and MXCSR against native
-Linux AMD64 for 312,800 scalar records, covering exceptional values, four rounding
+Linux AMD64 for 326,400 scalar records, covering exceptional values, four rounding
 modes, DAZ/FTZ combinations, and deterministic random inputs. Unit tests cover
 packed exceptions and page-end scalar reads. The adapter accounts for x86 NaN
 priority and directed-overflow flags: APFloat's saturation-to-maximum path reports
@@ -208,3 +208,8 @@ These checks do not establish complete SSE2, x87, transcendental, or FPU coverag
 CPUID remains conservative. CI also replays the native-generated AMD64 fixture
 and golden records on Apple Silicon; its status must be checked before claiming
 that cross-host comparison passed.
+
+Square root uses a bounded integer restoring algorithm on at most 106 significand
+bits, including exact remainder-based rounding. No additional square-root
+dependency is linked. A further 100,000 deterministic single/double pairs compare
+nearest rounding with the host square-root operation in tests.

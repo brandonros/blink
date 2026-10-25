@@ -16,7 +16,7 @@ struct record { unsigned long a,b,result; unsigned control,status,operation,widt
 #define FROMINT(instruction) __asm__ volatile(SETUP instruction " %2,%%xmm1; movq %%xmm1,%0; stmxcsr %1" ARGS)
 #define PREDICATE(instruction,predicate) __asm__ volatile(SETUP instruction " $" #predicate ",%%xmm1,%%xmm0; movq %%xmm0,%0; stmxcsr %1" ARGS)
 __attribute__((noreturn,force_align_arg_pointer)) void _start(void) {
-    for(unsigned width=4;width<=8;width+=4) for(unsigned op=0;op<23;op++)
+    for(unsigned width=4;width<=8;width+=4) for(unsigned op=0;op<24;op++)
     for(unsigned mode=0;mode<16;mode++) for(unsigned pair=0;pair<169+256;pair++) {
         const unsigned long *values=width==4?singles:doubles;
         unsigned long left,right;
@@ -35,7 +35,7 @@ __attribute__((noreturn,force_align_arg_pointer)) void _start(void) {
             case 8:FROMINT("cvtsi2sd");break;case 9:TOINT("cvtsd2si");break;case 10:TOINT("cvttsd2si");break;
             case 11:PREDICATE("cmpsd",0);break;case 12:PREDICATE("cmpsd",1);break;case 13:PREDICATE("cmpsd",2);break;case 14:PREDICATE("cmpsd",3);break;
             case 15:PREDICATE("cmpsd",4);break;case 16:PREDICATE("cmpsd",5);break;case 17:PREDICATE("cmpsd",6);break;case 18:PREDICATE("cmpsd",7);break;
-            case 19:TOINT32("cvtsd2si");break;case 20:TOINT32("cvttsd2si");break;case 21:FROMINT32("cvtsi2sd");break;case 22:CONVERT("cvtsd2ss");break;}
+            case 19:TOINT32("cvtsd2si");break;case 20:TOINT32("cvttsd2si");break;case 21:FROMINT32("cvtsi2sd");break;case 22:CONVERT("cvtsd2ss");break;case 23:CONVERT("sqrtsd");break;}
         } else {
             switch(op) {case 0:OP("addss");break;case 1:OP("subss");break;case 2:OP("mulss");break;case 3:OP("divss");break;
             case 4:OP("minss");break;case 5:OP("maxss");break;
@@ -43,7 +43,7 @@ __attribute__((noreturn,force_align_arg_pointer)) void _start(void) {
             case 8:FROMINT("cvtsi2ss");break;case 9:TOINT("cvtss2si");break;case 10:TOINT("cvttss2si");break;
             case 11:PREDICATE("cmpss",0);break;case 12:PREDICATE("cmpss",1);break;case 13:PREDICATE("cmpss",2);break;case 14:PREDICATE("cmpss",3);break;
             case 15:PREDICATE("cmpss",4);break;case 16:PREDICATE("cmpss",5);break;case 17:PREDICATE("cmpss",6);break;case 18:PREDICATE("cmpss",7);break;
-            case 19:TOINT32("cvtss2si");break;case 20:TOINT32("cvttss2si");break;case 21:FROMINT32("cvtsi2ss");break;case 22:CONVERT("cvtss2sd");break;}
+            case 19:TOINT32("cvtss2si");break;case 20:TOINT32("cvttss2si");break;case 21:FROMINT32("cvtsi2ss");break;case 22:CONVERT("cvtss2sd");break;case 23:CONVERT("sqrtss");break;}
         }
         if(call(1,1,(long)&r,sizeof r)!=sizeof r) {call(231,1,0,0);__builtin_unreachable();}
     }

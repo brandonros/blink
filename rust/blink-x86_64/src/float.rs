@@ -45,6 +45,85 @@ fn exceptions(status: Status) -> u32 {
         | (u32::from(status.contains(Status::UNDERFLOW)) << 4)
         | (u32::from(status.contains(Status::INEXACT)) << 5)
 }
+// Restoring integer square root, with the exact remainder. Binary32/binary64
+// significands need at most 106 bits after scaling, so no host float or wider
+// integer dependency is needed.
+fn integer_sqrt(mut value: u128) -> (u128, u128) {
+    let mut root = 0;
+    let mut bit = 1u128 << 126;
+    while bit > value {
+        bit >>= 2;
+    }
+    while bit != 0 {
+        if value >= root + bit {
+            value -= root + bit;
+            root = (root >> 1) + bit;
+        } else {
+            root >>= 1;
+        }
+        bit >>= 2;
+    }
+    (root, value)
+}
+fn square_root<F: Float>(bits: u64, mxcsr: u32, flags: &mut u32) -> u64 {
+    let mut inputs = 0;
+    let value = input::<F>(bits, mxcsr, &mut inputs);
+    if value.is_nan() {
+        if value.is_signaling() {
+            *flags |= 1;
+        }
+        return (value.to_bits() | (1 << (F::PRECISION - 2))) as u64;
+    }
+    if value.is_zero() {
+        return value.to_bits() as u64;
+    }
+    if value.is_negative() {
+        *flags |= 1;
+        return (-F::NAN).to_bits() as u64;
+    }
+    if value.is_infinite() {
+        return value.to_bits() as u64;
+    }
+    *flags |= inputs;
+    let fraction_bits = F::PRECISION - 1;
+    let hidden = 1u128 << fraction_bits;
+    let bits = value.to_bits();
+    let raw_exp = (bits >> fraction_bits) as i32;
+    let mut exponent = if raw_exp == 0 {
+        1 - F::MAX_EXP
+    } else {
+        raw_exp - F::MAX_EXP
+    };
+    let mut significand = bits & (hidden - 1);
+    if raw_exp != 0 {
+        significand |= hidden;
+    }
+    while significand < hidden {
+        significand <<= 1;
+        exponent -= 1;
+    }
+    if exponent & 1 != 0 {
+        significand <<= 1;
+        exponent -= 1;
+    }
+    let (mut result, remainder) = integer_sqrt(significand << fraction_bits);
+    if remainder != 0 {
+        *flags |= 32;
+        // An exact halfway root cannot occur: (integer + 1/2)^2 has a
+        // fractional quarter, whereas our scaled radicand is an integer.
+        if matches!(rounding(mxcsr), Round::TowardPositive)
+            || (matches!(rounding(mxcsr), Round::NearestTiesToEven) && remainder > result)
+        {
+            result += 1;
+        }
+    }
+    let mut output_exp = exponent / 2 + F::MAX_EXP;
+    if result >= hidden * 2 {
+        result >>= 1;
+        output_exp += 1;
+    }
+    ((output_exp as u128) << fraction_bits | (result & (hidden - 1))) as u64
+}
 fn compare<F: Float>(
     left: u64,
     right: u64,
@@ -223,6 +302,40 @@ impl X86 {
                 self.mxcsr = value;
             }
             Op::STMXCSR => self.write(m, a.ok_or_else(bad)?, self.mxcsr as u64)?,
+            Op::SQRTSS | Op::SQRTSD | Op::SQRTPS | Op::SQRTPD => {
+                let dst = a.ok_or_else(bad)?;
+                let src = self.vector(m, b.ok_or_else(bad)?)?;
+                let mut out = self.vector(m, dst)?;
+                let lane = if matches!(op, Op::SQRTSD | Op::SQRTPD) {
+                    8
+                } else {
+                    4
+                };
+                let count = if matches!(op, Op::SQRTSS | Op::SQRTSD) {
+                    lane
+                } else {
+                    16
+                };
+                let mut flags = 0;
+                for n in (0..count).step_by(lane) {
+                    let result = if lane == 4 {
+                        square_root::<Single>(
+                            u32::from_le_bytes(src[n..n + 4].try_into().unwrap()) as u64,
+                            self.mxcsr,
+                            &mut flags,
+                        )
+                    } else {
+                        square_root::<Double>(
+                            u64::from_le_bytes(src[n..n + 8].try_into().unwrap()),
+                            self.mxcsr,
+                            &mut flags,
+                        )
+                    };
+                    out[n..n + lane].copy_from_slice(&result.to_le_bytes()[..lane]);
+                }
+                self.fp_exceptions(flags)?;
+                self.write_vector(m, dst, out)?;
+            }
             Op::CVTSS2SD | Op::CVTSD2SS | Op::CVTPS2PD | Op::CVTPD2PS => {
                 let dst = a.ok_or_else(bad)?;
                 let src = self.vector(m, b.ok_or_else(bad)?)?;
@@ -488,6 +601,26 @@ impl X86 {
 mod tests {
     use super::*;
     use blink_core::Permissions;
+    #[test]
+    fn integer_square_root_matches_host_nearest_for_random_finite_inputs() {
+        let mut seed = 0x123456789abcdef0u64;
+        for _ in 0..100_000 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let single = (seed as u32) & 0x7f7fffff;
+            let double = seed & 0x7fefffffffffffff;
+            let mut flags = 0;
+            assert_eq!(
+                square_root::<Single>(single as u64, 0x1f80, &mut flags) as u32,
+                f32::from_bits(single).sqrt().to_bits()
+            );
+            assert_eq!(
+                square_root::<Double>(double, 0x1f80, &mut flags),
+                f64::from_bits(double).sqrt().to_bits()
+            );
+        }
+    }
     fn machine(code: &[u8]) -> (X86, Memory) {
         let mut memory = Memory::new(8192);
         memory.map(0x1000, 4096, Permissions::RX).unwrap();
