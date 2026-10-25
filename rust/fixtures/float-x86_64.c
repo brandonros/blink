@@ -15,6 +15,38 @@ struct record { unsigned long a,b,result; unsigned control,status,operation,widt
 #define CONVERT(instruction) __asm__ volatile(SETUP instruction " %%xmm0,%%xmm1; movq %%xmm1,%0; stmxcsr %1" ARGS)
 #define FROMINT(instruction) __asm__ volatile(SETUP instruction " %2,%%xmm1; movq %%xmm1,%0; stmxcsr %1" ARGS)
 #define PREDICATE(instruction,predicate) __asm__ volatile(SETUP instruction " $" #predicate ",%%xmm1,%%xmm0; movq %%xmm0,%0; stmxcsr %1" ARGS)
+#define PACKED(instruction) __asm__ volatile("ldmxcsr %3; movdqu %2,%%xmm0; " instruction " %%xmm0,%%xmm1; movdqu %%xmm1,%0; stmxcsr %1" :"=m"(output),"=m"(status):"m"(input),"m"(control):"xmm0","xmm1","memory")
+static void packed(void) {
+    for(unsigned op=0;op<8;op++) for(unsigned mode=0;mode<16;mode++)
+    for(unsigned pair=0;pair<169+256;pair++) {
+        unsigned long input[2],output[2]; unsigned status;
+        unsigned control=0x1f80|((mode&3)<<13)|((mode&4)?64:0)|((mode&8)?32768:0);
+        if(pair<169) {
+            if(op==1||op==2||op==6) {
+                input[0]=singles[pair/13]|(singles[pair%13]<<32);
+                input[1]=singles[(pair+3)%13]|(singles[(pair+7)%13]<<32);
+            } else {input[0]=doubles[pair/13];input[1]=doubles[pair%13];}
+        } else {
+            unsigned long seed=(pair-168)*0x9e3779b97f4a7c15ul;
+            seed ^= seed>>12; seed ^= seed<<25; seed ^= seed>>27; input[0]=seed*0x2545f4914f6cdd1dul;
+            seed ^= seed>>12; seed ^= seed<<25; seed ^= seed>>27; input[1]=seed*0x2545f4914f6cdd1dul;
+        }
+        switch(op) {
+        case 0:PACKED("cvtdq2ps");break;
+        case 1:PACKED("cvtps2dq");break;
+        case 2:PACKED("cvttps2dq");break;
+        case 3:PACKED("cvtdq2pd");break;
+        case 4:PACKED("cvtpd2dq");break;
+        case 5:PACKED("cvttpd2dq");break;
+        case 6:PACKED("cvtps2pd");break;
+        case 7:PACKED("cvtpd2ps");break;
+        }
+        for(unsigned half=0;half<2;half++) {
+            struct record r={input[0],input[1],output[half],control,status,24+op,16+half};
+            if(call(1,1,(long)&r,sizeof r)!=sizeof r) {call(231,1,0,0);__builtin_unreachable();}
+        }
+    }
+}
 __attribute__((noreturn,force_align_arg_pointer)) void _start(void) {
     for(unsigned width=4;width<=8;width+=4) for(unsigned op=0;op<24;op++)
     for(unsigned mode=0;mode<16;mode++) for(unsigned pair=0;pair<169+256;pair++) {
@@ -47,5 +79,6 @@ __attribute__((noreturn,force_align_arg_pointer)) void _start(void) {
         }
         if(call(1,1,(long)&r,sizeof r)!=sizeof r) {call(231,1,0,0);__builtin_unreachable();}
     }
+    packed();
     call(231,0,0,0); __builtin_unreachable();
 }

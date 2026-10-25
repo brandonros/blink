@@ -203,7 +203,7 @@ configuration has not yet appeared in this running instance's active policy.
 ## Floating-point interpreter
 
 SSE scalar and packed single/double add, subtract, multiply, divide, square root, minimum,
-maximum, comparisons, scalar integer conversions, and single/double conversions
+maximum, comparisons, scalar and packed integer conversions, and single/double conversions
 use pinned `rustc_apfloat` 0.2.3+llvm-462a31f5a5ab (Apache-2.0 WITH LLVM-exception).
 Arithmetic is software Rust, with no host floating-point mode changes or C
 fallback. MXCSR rounding, DAZ/FTZ, sticky exception bits, masked results, and
@@ -212,7 +212,7 @@ MXCSR and handlers start with the default control word. Synchronous fault
 handlers remain unsupported; an unmasked SIMD fault terminates the guest.
 
 `python3 rust/float-regressions.py` compares result bits and MXCSR against native
-Linux AMD64 for 326,400 scalar records, covering exceptional values, four rounding
+Linux AMD64 for 435,200 scalar and packed records, covering exceptional values, four rounding
 modes, DAZ/FTZ combinations, and deterministic random inputs. Unit tests cover
 packed exceptions and page-end scalar reads. The adapter accounts for x86 NaN
 priority and directed-overflow flags: APFloat's saturation-to-maximum path reports
@@ -260,3 +260,5 @@ Nanosleep and absolute/relative clock_nanosleep cooperate with scheduling and
 write remaining time on interruption. Virtual/profiling CPU timers and other
 clock IDs remain unsupported. The native comparison suite now has 14 compiled
 fixtures, including real-timer delivery, fork inheritance, and interrupted sleep.
+
+Packed conversion memory operands are checked at their architectural width: CVTDQ2PD and CVTPS2PD read eight bytes, even though the decoder reports a 16-byte vector width. Page-boundary and unmasked-exception tests guard source accesses and whole-destination preservation.

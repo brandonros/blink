@@ -369,6 +369,56 @@ impl X86 {
                 self.fp_exceptions(flags)?;
                 self.write_vector(m, dst, out)?;
             }
+            Op::CVTDQ2PS | Op::CVTDQ2PD => {
+                let dst = a.ok_or_else(bad)?;
+                let src = self.vector(m, b.ok_or_else(bad)?)?;
+                let mut out = [0; 16];
+                let width = if op == Op::CVTDQ2PS { 4 } else { 8 };
+                let mut flags = 0;
+                for n in 0..16 / width {
+                    let integer =
+                        i32::from_le_bytes(src[n * 4..n * 4 + 4].try_into().unwrap()) as i128;
+                    let value = if width == 4 {
+                        from_integer::<Single>(integer, self.mxcsr, &mut flags)
+                    } else {
+                        from_integer::<Double>(integer, self.mxcsr, &mut flags)
+                    };
+                    out[n * width..(n + 1) * width].copy_from_slice(&value.to_le_bytes()[..width]);
+                }
+                self.fp_exceptions(flags)?;
+                self.write_vector(m, dst, out)?;
+            }
+            Op::CVTPS2DQ | Op::CVTTPS2DQ | Op::CVTPD2DQ | Op::CVTTPD2DQ => {
+                let dst = a.ok_or_else(bad)?;
+                let src = self.vector(m, b.ok_or_else(bad)?)?;
+                // The double forms clear the upper 64 bits of the destination.
+                let mut out = [0; 16];
+                let single = matches!(op, Op::CVTPS2DQ | Op::CVTTPS2DQ);
+                let truncate = matches!(op, Op::CVTTPS2DQ | Op::CVTTPD2DQ);
+                let mut flags = 0;
+                for n in 0..if single { 4 } else { 2 } {
+                    let value = if single {
+                        to_integer::<Single>(
+                            u32::from_le_bytes(src[n * 4..n * 4 + 4].try_into().unwrap()) as u64,
+                            32,
+                            self.mxcsr,
+                            truncate,
+                            &mut flags,
+                        )
+                    } else {
+                        to_integer::<Double>(
+                            u64::from_le_bytes(src[n * 8..n * 8 + 8].try_into().unwrap()),
+                            32,
+                            self.mxcsr,
+                            truncate,
+                            &mut flags,
+                        )
+                    };
+                    out[n * 4..n * 4 + 4].copy_from_slice(&value.to_le_bytes()[..4]);
+                }
+                self.fp_exceptions(flags)?;
+                self.write_vector(m, dst, out)?;
+            }
             Op::CVTSS2SI | Op::CVTSD2SI | Op::CVTTSS2SI | Op::CVTTSD2SI => {
                 let dst = a.ok_or_else(bad)?;
                 let bytes = self.vector(m, b.ok_or_else(bad)?)?;
@@ -639,6 +689,34 @@ mod tests {
         cpu.step(&mut memory).unwrap();
         assert_eq!(&cpu.xmm[0][..4], &3.0f32.to_bits().to_le_bytes());
         assert_eq!(cpu.xmm[0][4..], [0xa5; 12]);
+    }
+    #[test]
+    fn packed_integer_to_double_reads_only_eight_bytes() {
+        // cvtdq2pd (%rax), %xmm0: m64 source, m128 result.
+        let (mut cpu, mut memory) = machine(&[0xf3, 0x0f, 0xe6, 0x00]);
+        cpu.regs[0] = 0x2ff8;
+        memory.store(0x2ff8, 0x800000007fffffff, 8).unwrap();
+        cpu.step(&mut memory).unwrap();
+        assert_eq!(&cpu.xmm[0][..8], &(i32::MAX as f64).to_le_bytes());
+        assert_eq!(&cpu.xmm[0][8..], &(i32::MIN as f64).to_le_bytes());
+        assert_eq!(cpu.mxcsr, 0x1f80);
+    }
+    #[test]
+    fn packed_conversion_fault_preserves_entire_destination() {
+        let (mut cpu, mut memory) = machine(&[0xf2, 0x0f, 0xe6, 0xc1]); // cvtpd2dq xmm1,xmm0
+        cpu.xmm[0] = [0xa5; 16];
+        cpu.xmm[1][..8].copy_from_slice(&1.5f64.to_le_bytes());
+        cpu.xmm[1][8..].copy_from_slice(&f64::INFINITY.to_le_bytes());
+        cpu.mxcsr &= !(1 << 7);
+        assert!(matches!(cpu.step(&mut memory), Err(Error::ArithmeticFault)));
+        assert_eq!(cpu.xmm[0], [0xa5; 16]);
+        assert_ne!(cpu.mxcsr & 1, 0);
+        cpu.rip = 0x1000;
+        cpu.mxcsr = 0x1f80;
+        cpu.step(&mut memory).unwrap();
+        assert_eq!(&cpu.xmm[0][..4], &2i32.to_le_bytes());
+        assert_eq!(&cpu.xmm[0][4..8], &i32::MIN.to_le_bytes());
+        assert_eq!(cpu.xmm[0][8..], [0; 8]);
     }
     #[test]
     fn packed_exceptions_accumulate_but_unmasked_fault_does_not_write_destination() {
