@@ -15,6 +15,29 @@ __attribute__((noreturn)) void _start(void) {
         x = ((x << 7) | (x >> 57)) ^ (y+i);
         y = y*inputs[3]+x;
     }
+    /* Results and architecturally defined CF/ZF, including zero and all bit positions. */
+    for(int bit=-1;bit<64;bit++) {
+        u64 source=bit<0?0:1ul<<bit, result, flags;
+        __asm__ volatile("tzcntq %2,%0; pushfq; popq %1":"=&r"(result),"=r"(flags):"r"(source):"cc");
+        unsigned expected=bit<0?64:(unsigned)bit;
+        fail |= result!=expected || (flags&65)!=((bit<0?1:0)|(expected==0?64:0));
+        __asm__ volatile("lzcntq %2,%0; pushfq; popq %1":"=&r"(result),"=r"(flags):"r"(source):"cc");
+        expected=bit<0?64:63-(unsigned)bit;
+        fail |= result!=expected || (flags&65)!=((bit<0?1:0)|(expected==0?64:0));
+        __asm__ volatile("tzcntl %k2,%k0; pushfq; popq %1":"=&r"(result),"=r"(flags):"r"(source):"cc");
+        expected=bit<0||bit>=32?32:(unsigned)bit;
+        fail |= result!=expected || (flags&65)!=((expected==32?1:0)|(expected==0?64:0));
+        __asm__ volatile("lzcntl %k2,%k0; pushfq; popq %1":"=&r"(result),"=r"(flags):"r"(source):"cc");
+        expected=bit<0||bit>=32?32:31-(unsigned)bit;
+        fail |= result!=expected || (flags&65)!=((expected==32?1:0)|(expected==0?64:0));
+        result=0x123456789abcdef0;
+        __asm__ volatile("tzcntw %w2,%w0; pushfq; popq %1":"+r"(result),"=r"(flags):"r"(source):"cc");
+        expected=bit<0||bit>=16?16:(unsigned)bit;
+        fail |= result!=(0x123456789abc0000ul|expected) || (flags&65)!=((expected==16?1:0)|(expected==0?64:0));
+        __asm__ volatile("lzcntw %w2,%w0; pushfq; popq %1":"+r"(result),"=r"(flags):"r"(source):"cc");
+        expected=bit<0||bit>=16?16:15-(unsigned)bit;
+        fail |= result!=(0x123456789abc0000ul|expected) || (flags&65)!=((expected==16?1:0)|(expected==0?64:0));
+    }
     char hex[33];
     for(int i=0;i<16;i++) {unsigned n=(x>>(i*4))&15;hex[i]="0123456789abcdef"[n];}
     for(int i=0;i<16;i++) {unsigned n=(y>>(i*4))&15;hex[i+16]="0123456789abcdef"[n];}

@@ -226,31 +226,43 @@ fn malformed_headers_do_not_panic() {
 }
 
 #[test]
-fn blocked_pipe_read_is_cancellable_and_context_recovers() {
+fn blocked_pipe_epoll_and_eventfd_are_cancellable_and_context_recovers() {
     // pipe(rsp-16); read(read_fd, rsp-8, 1), with our own write end still open.
     let code = [
         0x48, 0x83, 0xec, 0x10, 0x48, 0x89, 0xe7, 0xb8, 22, 0, 0, 0, 0x0f, 0x05, 0x8b, 0x3c, 0x24,
         0x48, 0x8d, 0x74, 0x24, 8, 0xba, 1, 0, 0, 0, 0x31, 0xc0, 0x0f, 0x05,
     ];
-    let r = Root::new();
-    r.write("blocked", &elf(GuestArch::X86_64, &code));
-    r.write("good", &elf(GuestArch::X86_64, &xexit(0)));
-    let mut rt = r.runtime(GuestArch::X86_64);
-    assert_eq!(
-        rt.run(Command::new("blocked").timeout(Duration::from_millis(3)))
-            .unwrap()
-            .termination,
-        Termination::TimedOut
-    );
-    let command = Command::new("blocked");
-    let token = command.cancellation.clone();
-    let thread = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(3));
-        token.cancel();
-    });
-    assert_eq!(rt.run(command).unwrap().termination, Termination::Cancelled);
-    thread.join().unwrap();
-    capture(&mut rt, "good").0.ensure_success().unwrap();
+    // epoll_create1(0); epoll_wait(ep, rsp-16, 1, -1).
+    let epoll = [
+        0x31, 0xff, 0xb8, 0x23, 1, 0, 0, 0x0f, 0x05, 0x89, 0xc7, 0x48, 0x83, 0xec, 16, 0x48, 0x89,
+        0xe6, 0xba, 1, 0, 0, 0, 0x41, 0xba, 255, 255, 255, 255, 0xb8, 232, 0, 0, 0, 0x0f, 0x05,
+    ];
+    // eventfd(0); read(fd, rsp-16, 8).
+    let counter = [
+        0x31, 0xff, 0xb8, 0x1c, 1, 0, 0, 0x0f, 0x05, 0x89, 0xc7, 0x48, 0x83, 0xec, 16, 0x48, 0x89,
+        0xe6, 0xba, 8, 0, 0, 0, 0x31, 0xc0, 0x0f, 0x05,
+    ];
+    for code in [&code[..], &epoll[..], &counter[..]] {
+        let r = Root::new();
+        r.write("blocked", &elf(GuestArch::X86_64, code));
+        r.write("good", &elf(GuestArch::X86_64, &xexit(0)));
+        let mut rt = r.runtime(GuestArch::X86_64);
+        assert_eq!(
+            rt.run(Command::new("blocked").timeout(Duration::from_millis(3)))
+                .unwrap()
+                .termination,
+            Termination::TimedOut
+        );
+        let command = Command::new("blocked");
+        let token = command.cancellation.clone();
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(3));
+            token.cancel();
+        });
+        assert_eq!(rt.run(command).unwrap().termination, Termination::Cancelled);
+        thread.join().unwrap();
+        capture(&mut rt, "good").0.ensure_success().unwrap();
+    }
 }
 #[test]
 fn root_exit_destroys_looping_descendant() {

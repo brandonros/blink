@@ -119,12 +119,10 @@ pub(super) fn lookup(
         let bytes = match leaf {
             Some("status") => {
                 let threads = others.values().filter(|p| p.group == process.group).count() + 1;
-                let command = process
-                    .argv
-                    .first()
-                    .and_then(|p| Path::new(p).file_name())
-                    .map(|p| p.to_string_lossy())
-                    .unwrap_or_default();
+                let end = process.comm.iter().position(|b| *b == 0).unwrap_or(16);
+                let command = String::from_utf8_lossy(&process.comm[..end])
+                    .replace('\\', "\\\\")
+                    .replace('\n', "\\n");
                 let c = &process.credentials;
                 let (effective, permitted) = super::credentials::capabilities(c);
                 format!("Name:\t{}\nState:\tR (running)\nTgid:\t{}\nPid:\t{}\nPPid:\t{}\nUid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\nThreads:\t{}\nVmSize:\t{} kB\nSigPnd:\t{:016x}\nSigBlk:\t{:016x}\nCapInh:\t0000000000000000\nCapPrm:\t{permitted:016x}\nCapEff:\t{effective:016x}\n",command,process.group,process.group,process.parent,c.uid,c.euid,c.suid,c.euid,c.gid,c.egid,c.sgid,c.egid,threads,process.memory.borrow().mapped_bytes()/1024,process.signals.bits,process.signal_mask).into_bytes()

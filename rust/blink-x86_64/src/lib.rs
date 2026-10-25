@@ -951,6 +951,19 @@ impl Cpu for X86 {
                     self.write(m, dst, value)?;
                 }
             }
+            Op::TZCNT | Op::LZCNT => {
+                let dst = a.ok_or_else(bad)?;
+                let bits = (dst.width() * 8) as u32;
+                let value = self.read(m, b.ok_or_else(bad)?)? & mask(dst.width());
+                let count = if op == Op::TZCNT {
+                    value.trailing_zeros().min(bits)
+                } else {
+                    value.leading_zeros() - (64 - bits)
+                };
+                self.write(m, dst, count as u64)?;
+                self.flags =
+                    (self.flags & !65) | u64::from(value == 0) | (u64::from(count == 0) << 6);
+            }
             Op::BSF | Op::BSR => {
                 let value = self.read(m, b.ok_or_else(bad)?)?;
                 self.flags = (self.flags & !64) | ((value == 0) as u64) << 6;

@@ -68,6 +68,7 @@ struct Process {
     tid: u32,
     credentials: blink_linux::Credentials,
     executable: std::path::PathBuf,
+    comm: [u8; 16],
     argv: Vec<String>,
     env: Vec<String>,
     cpu: Engine,
@@ -249,6 +250,7 @@ pub(super) fn run(
             parent: 0,
             tid: 1,
             credentials,
+            comm: task_name(&initial.executable),
             executable: initial.executable,
             argv: initial.argv,
             env: command.env.clone(),
@@ -404,6 +406,7 @@ pub(super) fn run(
                         169 => 96,
                         25 => 72,
                         160 => 63,
+                        167 => 157,
                         19 => 290,
                         20 => 291,
                         21 => 233,
@@ -2291,6 +2294,48 @@ pub(super) fn run(
                         }
                         _ => return Err(Error::UnsupportedSyscall(number)),
                     },
+                    157 => match args[0] {
+                        15 => {
+                            let mut name = [0u8; 16];
+                            let mut valid = true;
+                            for (index, byte) in name[..15].iter_mut().enumerate() {
+                                match args[1]
+                                    .checked_add(index as u64)
+                                    .and_then(|a| process.memory.borrow().load(a, 1).ok())
+                                {
+                                    Some(value) => {
+                                        *byte = value as u8;
+                                        if *byte == 0 {
+                                            break;
+                                        }
+                                    }
+                                    None => {
+                                        valid = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if valid {
+                                process.comm = name;
+                                0
+                            } else {
+                                errno(14)
+                            }
+                        }
+                        16 => {
+                            if process
+                                .memory
+                                .borrow_mut()
+                                .write(args[1], &process.comm)
+                                .is_ok()
+                            {
+                                0
+                            } else {
+                                errno(14)
+                            }
+                        }
+                        _ => return Err(Error::UnsupportedSyscall(number)),
+                    },
                     218 => {
                         process.clear_tid = args[0];
                         pid as u64
@@ -2524,6 +2569,7 @@ pub(super) fn run(
                                                 new.stack,
                                             );
                                             process.memory = Rc::new(RefCell::new(new.memory));
+                                            process.comm = task_name(&new.executable);
                                             process.executable = new.executable;
                                             process.argv = new.argv;
                                             process.env = env.clone();
@@ -4190,4 +4236,12 @@ mod descriptor_tests {
         assert_eq!(poll_events(Some(&read), 0), 16);
         assert_eq!(poll_events(None, 0), 32);
     }
+}
+
+fn task_name(path: &std::path::Path) -> [u8; 16] {
+    let mut name = [0; 16];
+    let source = path.file_name().unwrap_or_default().to_string_lossy();
+    let length = source.len().min(15);
+    name[..length].copy_from_slice(&source.as_bytes()[..length]);
+    name
 }
