@@ -397,7 +397,12 @@ impl Fpu {
         self.status |= bits;
         if self.status & !self.control & 63 != 0 {
             self.status |= 0x8080;
-            false
+            // Precision is a post-computation exception: commit the rounded
+            // result, memory store and stack pop before the next waiting
+            // instruction reports the pending exception. Invalid/denormal/
+            // zero-divide suppress completion; unmasked overflow/underflow
+            // additionally need wrapped results (not yet implemented).
+            self.status & !self.control & 31 == 0
         } else {
             true
         }
@@ -1907,6 +1912,22 @@ mod tests {
             assert_eq!(cpu.fpu.get(0, &mut 0), x.to_bits());
             assert_eq!(cpu.fpu.status() & 0x8081, 0x8081);
         }
+    }
+    #[test]
+    fn unmasked_precision_commits_store_and_pop_before_deferred_fault() {
+        let (mut cpu, mut memory) = machine(&[0xdb, 0x18]); // fistpl (%rax)
+        cpu.regs[0] = 0x2000;
+        cpu.fpu
+            .set(0, Extended::from_u128(3).value.scalbn(-1).to_bits());
+        cpu.fpu.control &= !32;
+        cpu.step(&mut memory).unwrap();
+        assert_eq!(memory.load(0x2000, 4).unwrap(), 2);
+        assert_eq!(cpu.fpu.top, 1);
+        assert_eq!(cpu.fpu.status() & 0x82a0, 0x82a0);
+        assert!(matches!(
+            cpu.x87(&mut memory, Op::WAIT, None, None, 0x1000),
+            Err(Error::ArithmeticFault)
+        ));
     }
     #[test]
     fn trig_range_rejection_preserves_registers_and_stack() {

@@ -592,3 +592,11 @@ precision. The gate permits only UE differences for that exact input boundary
 (and its signed/pseudo-denormal forms), retaining every occurrence in the report.
 All other exception comparisons remain strict. C1 and last-bit differences remain
 expected for approximate instructions, and full FPU support is still incomplete.
+
+Unmasked precision exceptions now commit the rounded result, memory store and
+stack pop before setting the deferred exception state. A separate 216-record
+native oracle covers add/multiply/divide, square root, rounding, float/integer/BCD
+stores and popping arithmetic across precision and rounding controls, with PE
+masked and unmasked. CI replays those exact bytes on Apple Silicon. Unmasked
+overflow/underflow wrapped results and guest synchronous SIGFPE delivery remain
+outstanding; this does not complete the x87 exception model.
