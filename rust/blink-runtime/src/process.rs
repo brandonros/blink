@@ -4188,6 +4188,14 @@ fn access_mode(
     }
 }
 
+fn task_name(path: &std::path::Path) -> [u8; 16] {
+    let mut name = [0; 16];
+    let source = path.file_name().unwrap_or_default().to_string_lossy();
+    let length = source.len().min(15);
+    name[..length].copy_from_slice(&source.as_bytes()[..length]);
+    name
+}
+
 #[cfg(test)]
 mod descriptor_tests {
     use super::*;
@@ -4236,12 +4244,4 @@ mod descriptor_tests {
         assert_eq!(poll_events(Some(&read), 0), 16);
         assert_eq!(poll_events(None, 0), 32);
     }
-}
-
-fn task_name(path: &std::path::Path) -> [u8; 16] {
-    let mut name = [0; 16];
-    let source = path.file_name().unwrap_or_default().to_string_lossy();
-    let length = source.len().min(15);
-    name[..length].copy_from_slice(&source.as_bytes()[..length]);
-    name
 }
