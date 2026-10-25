@@ -67,6 +67,7 @@ struct Page {
     bytes: Box<[u8; 4096]>,
     permissions: Permissions,
     bus_fault: bool,
+    inherit_on_fork: bool,
 }
 #[derive(Clone)]
 pub struct Memory {
@@ -108,8 +109,48 @@ impl Memory {
                     bytes: Box::new([0; 4096]),
                     permissions,
                     bus_fault: false,
+                    inherit_on_fork: true,
                 },
             );
+        }
+        Ok(())
+    }
+    /// Deep-copy inherited mappings for a Linux fork. Ordinary Clone remains
+    /// an exact copy; shared-address-space threads/vfork do not use this method.
+    pub fn fork_copy(&self) -> Self {
+        Self {
+            pages: self
+                .pages
+                .iter()
+                .filter(|(_, page)| page.inherit_on_fork)
+                .map(|(address, page)| (*address, page.clone()))
+                .collect(),
+            max_pages: self.max_pages,
+        }
+    }
+    pub fn fork_bytes(&self) -> usize {
+        self.pages
+            .values()
+            .filter(|page| page.inherit_on_fork)
+            .count()
+            * 4096
+    }
+    pub fn set_fork_inheritance(&mut self, address: u64, size: u64, inherit: bool) -> Result<()> {
+        if address % PAGE != 0 || size % PAGE != 0 {
+            return Err(Error::InvalidConfig("unaligned fork advice".into()));
+        }
+        if size == 0 {
+            return Ok(());
+        }
+        let end = address.checked_add(size).ok_or(Error::ResourceLimit)?;
+        if self.mapped_in_range(address, size) as u64 != size {
+            return Err(Error::MemoryFault {
+                address,
+                access: Access::Read,
+            });
+        }
+        for (_, page) in self.pages.range_mut(address / PAGE..end / PAGE) {
+            page.inherit_on_fork = inherit;
         }
         Ok(())
     }

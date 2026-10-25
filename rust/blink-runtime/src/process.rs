@@ -449,6 +449,8 @@ pub(super) fn run(
                         215 => 11,
                         222 => 9,
                         226 => 10,
+                        233 => 28,
+                        179 => 99,
                         56 => 257,
                         62 => 8,
                         61 => 217,
@@ -1765,6 +1767,58 @@ pub(super) fn run(
                         heap.brk
                     }
                     9 => map_memory(config, &process, &processes, args)?,
+                    99 => {
+                        // Report guest resource limits rather than leaking the host's
+                        // RAM/swap availability into allocator sizing decisions.
+                        let used =
+                            memory_usage(processes.values().chain(std::iter::once(&process)));
+                        let mut info = [0u8; 112];
+                        info[..8].copy_from_slice(&start.elapsed().as_secs().to_le_bytes());
+                        info[32..40].copy_from_slice(&(config.max_memory as u64).to_le_bytes());
+                        info[40..48].copy_from_slice(
+                            &(config.max_memory.saturating_sub(used) as u64).to_le_bytes(),
+                        );
+                        info[80..82].copy_from_slice(&((processes.len() + 1) as u16).to_le_bytes());
+                        info[104..108].copy_from_slice(&1u32.to_le_bytes());
+                        if process.memory.borrow_mut().write(args[0], &info).is_ok() {
+                            0
+                        } else {
+                            errno(14)
+                        }
+                    }
+                    28 => {
+                        if args[0] & 4095 != 0 || args[1].checked_add(4095).is_none() {
+                            errno(22)
+                        } else {
+                            let size = args[1].div_ceil(4096) * 4096;
+                            match args[2] {
+                                10 | 11 => {
+                                    if process
+                                        .memory
+                                        .borrow_mut()
+                                        .set_fork_inheritance(args[0], size, args[2] == 11)
+                                        .is_ok()
+                                    {
+                                        0
+                                    } else {
+                                        errno(12)
+                                    }
+                                }
+                                // Access-pattern advice changes optimization only; this
+                                // interpreter has no host paging/readahead policy.
+                                0..=3 => {
+                                    if process.memory.borrow().mapped_in_range(args[0], size) as u64
+                                        == size
+                                    {
+                                        0
+                                    } else {
+                                        errno(12)
+                                    }
+                                }
+                                _ => return Err(Error::UnsupportedSyscall(number)),
+                            }
+                        }
+                    }
                     10 | 11 => {
                         if args[0] & 4095 != 0
                             || (nr == 11 && args[1] == 0)
@@ -2388,7 +2442,7 @@ pub(super) fn run(
                             || (!thread
                                 && !vfork
                                 && total
-                                    .checked_add(process.memory.borrow().mapped_bytes())
+                                    .checked_add(process.memory.borrow().fork_bytes())
                                     .is_none_or(|n| n > config.max_memory))
                         {
                             errno(11)
@@ -2441,7 +2495,7 @@ pub(super) fn run(
                             } else {
                                 if !vfork {
                                     child.memory =
-                                        Rc::new(RefCell::new(process.memory.borrow().clone()));
+                                        Rc::new(RefCell::new(process.memory.borrow().fork_copy()));
                                     child.heap =
                                         Rc::new(RefCell::new(process.heap.borrow().clone()));
                                 } else if nr == 56 && args[1] != 0 {

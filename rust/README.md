@@ -173,7 +173,7 @@ The preexisting C executable, config, clean-build log and hash manifest are in
 `o/rust-reference` directory. On this Linux x86_64 host, Rust, C interpreter and
 native Linux comparisons retain per-fixture results. The expanded filesystem,
 MXCSR restart, socketpair and alternate-stack cases expose additional C baseline
-differences; consult the report rather than treating the C runtime as the oracle. All 20 fixtures pass Rust/native. C differs on vfork memory sharing and
+differences; consult the report rather than treating the C runtime as the oracle. All 21 fixtures pass Rust/native. C differs on vfork memory sharing and
 returns extra F_GETFL flags on a CLOEXEC pipe in the descriptor fixture. C JIT fails the pipe/fork
 fixture and crashes during the exec fixture, including after a clean rebuild.
 Those failures remain visible; C is a comparison target, not an infallible oracle.
@@ -259,7 +259,7 @@ children, and remain through exec. Threads share their process timer; pending
 standard signals coalesce. Wall/monotonic clock queries use host clock adapters.
 Nanosleep and absolute/relative clock_nanosleep cooperate with scheduling and
 write remaining time on interruption. Virtual/profiling CPU timers and other
-clock IDs remain unsupported. The native comparison suite now has 20 compiled
+clock IDs remain unsupported. The native comparison suite now has 21 compiled
 fixtures, including real-timer delivery, fork inheritance, and interrupted sleep.
 
 Packed conversion memory operands are checked at their architectural width: CVTDQ2PD and CVTPS2PD read eight bytes, even though the decoder reports a 16-byte vector width. Page-boundary and unmasked-exception tests guard source accesses and whole-destination preservation.
@@ -324,7 +324,7 @@ manifest is `sha256:025b8e975a61d94e33abeafaad1255ef44e4898cf1a1b6446860009c72e6
 the Node executable SHA-256 is `5a92a46a1d8279fec6776e3123ca22e26a6fddbb7cf1b55e019dbb38eea8ff26`.
 This is not yet a JavaScript execution gate: the current `--jitless -p '1 + 2'`
 probe has progressed through thread startup and SIMD/conditional-move feature checks,
-and currently stops at madvise(MADV_DONTFORK).
+and currently stops at an mremap probe.
 The feature qualifications are documented in [CPU-FEATURES.md](CPU-FEATURES.md). CLI `--max-memory BYTES` and `--max-image-size BYTES`
 expose existing runtime limits for this 130 MB executable.
 
@@ -409,3 +409,11 @@ It includes both taken and untaken conditional moves, signaling/quiet NaNs and
 empty source/destination slots. Empty-stack arithmetic and sign operations
 produce the negative indefinite value even when another NaN is available.
 CMOV advertisement covers the integer and x87 forms together.
+
+
+MADV_DONTFORK/MADV_DOFORK apply per guest page, independent of read/write
+permissions. Fork copies only inherited mappings and accounts for those copied
+bytes; threads and vfork retain their shared address space. The native fixture
+checks partial-page rounding, PROT_NONE, inheritance restoration and parent/child
+isolation. Guest sysinfo reports runtime memory limits/free budget, task count
+and elapsed run time, with no guest swap or host memory statistics.
