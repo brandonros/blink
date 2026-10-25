@@ -485,3 +485,69 @@ fn overflowing_syscall_pointer_returns_efault_without_poisoning_context() {
         .ensure_success()
         .unwrap();
 }
+
+#[test]
+fn output_backpressure_respects_nonblocking_and_cancellation() {
+    struct Blocked;
+    impl std::io::Write for Blocked {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::WouldBlock.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let r = Root::new();
+    for nonblock in [false, true] {
+        let mut code = Vec::new();
+        if nonblock {
+            code.extend([
+                0xb8, 72, 0, 0, 0, 0xbf, 1, 0, 0, 0, 0xbe, 4, 0, 0, 0, 0xba, 0, 8, 0, 0, 0x0f, 0x05,
+            ]);
+        }
+        code.extend([0xb8, 1, 0, 0, 0, 0xbf, 1, 0, 0, 0, 0x48, 0xbe]);
+        let address_offset = code.len();
+        code.extend([0; 8]);
+        code.extend([
+            0xba, 1, 0, 0, 0, 0x0f, 0x05, 0x83, 0xc0, 11, 0x89, 0xc7, 0xb8, 231, 0, 0, 0, 0x0f,
+            0x05,
+        ]);
+        let address = 0x401000 + code.len() as u64;
+        code[address_offset..address_offset + 8].copy_from_slice(&address.to_le_bytes());
+        code.push(b'x');
+        r.write(
+            if nonblock { "nonblock" } else { "blocking" },
+            &elf(GuestArch::X86_64, &code),
+        );
+    }
+    r.write("good", &elf(GuestArch::X86_64, &xexit(0)));
+    let mut runtime = r.runtime(GuestArch::X86_64);
+    runtime
+        .run_with_io(Command::new("nonblock"), &mut Blocked, &mut Vec::new())
+        .unwrap()
+        .ensure_success()
+        .unwrap();
+    let outcome = runtime
+        .run_with_io(
+            Command::new("blocking").timeout(Duration::from_millis(3)),
+            &mut Blocked,
+            &mut Vec::new(),
+        )
+        .unwrap();
+    assert_eq!(outcome.termination, Termination::TimedOut);
+    let command = Command::new("blocking");
+    let token = command.cancellation.clone();
+    let thread = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(3));
+        token.cancel();
+    });
+    assert_eq!(
+        runtime
+            .run_with_io(command, &mut Blocked, &mut Vec::new())
+            .unwrap()
+            .termination,
+        Termination::Cancelled
+    );
+    thread.join().unwrap();
+    capture(&mut runtime, "good").0.ensure_success().unwrap();
+}

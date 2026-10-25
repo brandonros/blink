@@ -1,6 +1,7 @@
 //! Cooperative guest processes. No host fork, host signals, or blocking guest pipes.
 mod credentials;
 mod internet;
+mod output;
 mod poll;
 mod signals;
 mod socket;
@@ -275,9 +276,9 @@ pub(super) fn run(
             vfork_wait: None,
             vfork_parent: None,
             fds: Rc::new(RefCell::new(BTreeMap::from([
-                (0, Fd::Stdin),
-                (1, Fd::Stdout),
-                (2, Fd::Stderr),
+                (0, Fd::Stdin(Rc::new(Cell::new(false)))),
+                (1, Fd::Stdout(Rc::new(Cell::new(false)))),
+                (2, Fd::Stderr(Rc::new(Cell::new(false)))),
             ]))),
             pending: None,
             descriptor_flags: Rc::new(RefCell::new(BTreeSet::new())),
@@ -1186,6 +1187,14 @@ pub(super) fn run(
                                         Err(_) => errno(14),
                                         Ok(flag) => {
                                             match process.fds.borrow().get(&(args[0] as i32)) {
+                                                Some(
+                                                    Fd::Stdin(status)
+                                                    | Fd::Stdout(status)
+                                                    | Fd::Stderr(status),
+                                                ) => {
+                                                    status.set(flag != 0);
+                                                    0
+                                                }
                                                 Some(Fd::Reader(p)) => {
                                                     p.borrow_mut().read_nonblock = flag != 0;
                                                     0
@@ -1298,7 +1307,13 @@ pub(super) fn run(
                                     Fd::UnixSocket { nonblock, .. } => {
                                         2 | if *nonblock { 0x800 } else { 0 }
                                     }
-                                    Fd::Stdin => 0,
+                                    Fd::Stdin(status) => {
+                                        if status.get() {
+                                            0x800
+                                        } else {
+                                            0
+                                        }
+                                    }
                                     Fd::Reader(p) => {
                                         if p.borrow().read_nonblock {
                                             0x800
@@ -1309,7 +1324,9 @@ pub(super) fn run(
                                     Fd::Writer(p) => {
                                         1 | if p.borrow().write_nonblock { 0x800 } else { 0 }
                                     }
-                                    Fd::Stdout | Fd::Stderr => 1,
+                                    Fd::Stdout(status) | Fd::Stderr(status) => {
+                                        1 | if status.get() { 0x800 } else { 0 }
+                                    }
                                     Fd::File {
                                         read,
                                         write,
@@ -1326,6 +1343,10 @@ pub(super) fn run(
                                     }
                                 },
                                 4 => match &fd {
+                                    Fd::Stdin(status) | Fd::Stdout(status) | Fd::Stderr(status) => {
+                                        status.set(args[2] & 0x800 != 0);
+                                        0
+                                    }
                                     Fd::Reader(p) => {
                                         p.borrow_mut().read_nonblock = args[2] & 0x800 != 0;
                                         0
@@ -1480,7 +1501,30 @@ pub(super) fn run(
                                         }
                                     }
                                 }
-                                Some(Fd::Stdout | Fd::Stderr | Fd::File { write: true, .. }) => {
+                                Some(Fd::Stdout(status) | Fd::Stderr(status)) => {
+                                    let sink: &mut dyn Write = if matches!(fd, Some(Fd::Stdout(_)))
+                                    {
+                                        &mut *stdout
+                                    } else {
+                                        &mut *stderr
+                                    };
+                                    let result = output::vectored(
+                                        &process.memory.borrow(),
+                                        sink,
+                                        args[1],
+                                        args[2],
+                                    )?;
+                                    match result {
+                                        Some(result) => result,
+                                        None if status.get() => errno(11),
+                                        None => {
+                                            process.pending = Some((number, args));
+                                            event = Event::Blocked;
+                                            break;
+                                        }
+                                    }
+                                }
+                                Some(Fd::File { write: true, .. }) => {
                                     if process
                                         .memory
                                         .borrow()
@@ -1525,12 +1569,6 @@ pub(super) fn run(
                                                     Access::Read,
                                                 )?;
                                                 let wrote = match fd.as_ref().unwrap() {
-                                                    Fd::Stdout => stdout
-                                                        .write_all(&bytes[..count])
-                                                        .map(|_| count),
-                                                    Fd::Stderr => stderr
-                                                        .write_all(&bytes[..count])
-                                                        .map(|_| count),
                                                     Fd::File { file, .. } => {
                                                         file.borrow_mut().write(&bytes[..count])
                                                     }
@@ -1545,12 +1583,6 @@ pub(super) fn run(
                                                         }
                                                     }
                                                     Err(e) => {
-                                                        if matches!(
-                                                            fd,
-                                                            Some(Fd::Stdout | Fd::Stderr)
-                                                        ) {
-                                                            return Err(e.into());
-                                                        }
                                                         if result == 0 {
                                                             result = blink_linux::errno(&e);
                                                         }
@@ -2783,7 +2815,7 @@ pub(super) fn run(
                                 0
                             } else {
                                 match (nr, &fd) {
-                                    (0, Fd::Stdin) => 0,
+                                    (0, Fd::Stdin(_)) => 0,
                                     (_, Fd::Epoll(_)) => errno(22),
                                     (_, Fd::Virtual(v)) => {
                                         let mut v = v.borrow_mut();
@@ -2962,25 +2994,27 @@ pub(super) fn run(
                                         pipe.bytes.extend(bytes);
                                         count as u64
                                     }
-                                    (1, Fd::Stdout) | (1, Fd::Stderr) => {
-                                        let sink: &mut dyn Write = if matches!(fd, Fd::Stdout) {
+                                    (1, Fd::Stdout(status)) | (1, Fd::Stderr(status)) => {
+                                        let sink: &mut dyn Write = if matches!(&fd, Fd::Stdout(_)) {
                                             &mut *stdout
                                         } else {
                                             &mut *stderr
                                         };
-                                        let mut buf = [0; 4096];
-                                        let mut done = 0;
-                                        while done < count {
-                                            let n = (count - done).min(buf.len());
-                                            process.memory.borrow().read(
-                                                args[1] + done as u64,
-                                                &mut buf[..n],
-                                                Access::Read,
-                                            )?;
-                                            sink.write_all(&buf[..n])?;
-                                            done += n;
+                                        let result = output::transfer(
+                                            &process.memory.borrow(),
+                                            sink,
+                                            args[1],
+                                            count,
+                                        )?;
+                                        match result {
+                                            Some(result) => result,
+                                            None if status.get() => errno(11),
+                                            None => {
+                                                process.pending = Some((number, args));
+                                                event = Event::Blocked;
+                                                break;
+                                            }
                                         }
-                                        done as u64
                                     }
                                     _ => errno(9),
                                 }
@@ -3679,8 +3713,8 @@ fn poll_events(fd: Option<&Fd>, wanted: u16) -> u16 {
         Some(Fd::Internet(s)) => internet::events(&s.borrow()),
         Some(Fd::Socket(s)) => socket::events(s),
         Some(Fd::UnixSocket { .. }) => 4 | 16 | 256,
-        Some(Fd::Stdin) => 1 | 64,
-        Some(Fd::Stdout | Fd::Stderr) => 4 | 256,
+        Some(Fd::Stdin(_)) => 1 | 64,
+        Some(Fd::Stdout(_) | Fd::Stderr(_)) => 4 | 256,
         // Linux regular files are always ready, even if the following I/O
         // will fail because the descriptor's access mode does not permit it.
         Some(Fd::File { .. } | Fd::Directory(_)) => 1 | 4 | 64 | 256,
@@ -3863,11 +3897,11 @@ fn send_file(
         _ => return Ok(Some(errno(22))),
     };
     match output {
-        Fd::File { write: false, .. } | Fd::Reader(_) | Fd::Stdin => return Ok(Some(errno(9))),
+        Fd::File { write: false, .. } | Fd::Reader(_) | Fd::Stdin(_) => return Ok(Some(errno(9))),
         Fd::File { append: true, .. } => return Ok(Some(errno(22))),
         Fd::File { file: out, .. } if Rc::ptr_eq(file, out) => return Ok(Some(errno(22))),
         Fd::Virtual(v) if v.borrow().write => (),
-        Fd::Stdout | Fd::Stderr | Fd::Writer(_) | Fd::Socket(_) => (),
+        Fd::Stdout(_) | Fd::Stderr(_) | Fd::Writer(_) | Fd::Socket(_) => (),
         Fd::UnixSocket { .. } => return Ok(Some(errno(107))),
         Fd::File { .. } => (),
         _ => return Ok(Some(errno(9))),
@@ -3923,13 +3957,19 @@ fn send_file(
     };
     let wrote = match output {
         Fd::Virtual(_) => read,
-        Fd::Stdout => {
-            stdout.write_all(&bytes[..read])?;
-            read
-        }
-        Fd::Stderr => {
-            stderr.write_all(&bytes[..read])?;
-            read
+        Fd::Stdout(status) | Fd::Stderr(status) => {
+            let sink: &mut dyn Write = if matches!(output, Fd::Stdout(_)) {
+                stdout
+            } else {
+                stderr
+            };
+            match sink.write(&bytes[..read]) {
+                Ok(wrote) => wrote,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    return Ok(status.get().then_some(errno(11)))
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
         Fd::Socket(socket) => {
             socket.send.borrow_mut().bytes.extend(&bytes[..read]);

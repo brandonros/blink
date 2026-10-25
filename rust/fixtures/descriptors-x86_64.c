@@ -38,6 +38,13 @@ __attribute__((noreturn)) void _start(void) {
     CHECK(call(20,d,(long)v,2,0)==-32);
     CHECK(call(3,d,0,0,0)==0);
     CHECK(call(72,d,1,0,0)==-9);
+    long stream=call(32,1,0,0,0);CHECK(stream>=0);
+    long original=call(72,1,3,0,0);int enabled=1;
+    CHECK(call(16,stream,0x5421,(long)&enabled,0)==0 && (call(72,1,3,0,0)&0x800)!=0);
+    long child=call(57,0,0,0,0);CHECK(child>=0);
+    if(child==0){CHECK(call(72,1,4,original,0)==0);call(231,0,0,0,0);__builtin_unreachable();}
+    int status;CHECK(call(61,child,(long)&status,0,0)==child && status==0);
+    CHECK(call(72,stream,3,0,0)==original && call(3,stream,0,0,0)==0);
     call(231,0,0,0,0);
     __builtin_unreachable();
 }

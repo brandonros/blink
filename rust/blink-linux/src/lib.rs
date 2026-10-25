@@ -98,9 +98,9 @@ pub enum Fd {
         cloexec: bool,
         append: bool,
     },
-    Stdin,
-    Stdout,
-    Stderr,
+    Stdin(Rc<std::cell::Cell<bool>>),
+    Stdout(Rc<std::cell::Cell<bool>>),
+    Stderr(Rc<std::cell::Cell<bool>>),
     Reader(Rc<RefCell<Pipe>>),
     Writer(Rc<RefCell<Pipe>>),
 }
@@ -130,9 +130,9 @@ impl Clone for Fd {
                 cloexec: *cloexec,
                 append: *append,
             },
-            Self::Stdin => Self::Stdin,
-            Self::Stdout => Self::Stdout,
-            Self::Stderr => Self::Stderr,
+            Self::Stdin(status) => Self::Stdin(status.clone()),
+            Self::Stdout(status) => Self::Stdout(status.clone()),
+            Self::Stderr(status) => Self::Stderr(status.clone()),
             Self::Reader(p) => {
                 p.borrow_mut().readers += 1;
                 Self::Reader(p.clone())
@@ -227,9 +227,9 @@ impl Fd {
                     Self::Socket(s) => s.inode,
                     Self::Internet(s) => s.borrow().inode,
                     Self::UnixSocket { inode, .. } => *inode,
-                    Self::Stdin => 1,
-                    Self::Stdout => 2,
-                    Self::Stderr => 3,
+                    Self::Stdin(_) => 1,
+                    Self::Stdout(_) => 2,
+                    Self::Stderr(_) => 3,
                     Self::Reader(p) | Self::Writer(p) => p.borrow().inode,
                     _ => unreachable!(),
                 },

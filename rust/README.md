@@ -324,7 +324,7 @@ manifest is `sha256:025b8e975a61d94e33abeafaad1255ef44e4898cf1a1b6446860009c72e6
 the Node executable SHA-256 is `5a92a46a1d8279fec6776e3123ca22e26a6fddbb7cf1b55e019dbb38eea8ff26`.
 This is not yet a JavaScript execution gate: the current `--jitless -p '1 + 2'`
 probe has progressed through thread startup and SIMD/conditional-move feature checks,
-and progresses through V8 heap initialization; the 60-second probe timed out.
+and now evaluates and prints `3` for `1 + 2`; shutdown stops at futex requeue.
 The feature qualifications are documented in [CPU-FEATURES.md](CPU-FEATURES.md). CLI `--max-memory BYTES` and `--max-image-size BYTES`
 expose existing runtime limits for this 130 MB executable.
 
@@ -426,3 +426,13 @@ File-backed mappings can move/shrink, but extending them remains unsupported;
 DONTUNMAP, shared mappings and full Linux VMA split/merge behavior are not covered.
 The native remap fixture checks blocked growth, moves, replacement, invalid ranges,
 read-only pages, fork advice and shrink behavior.
+
+
+Guest standard streams share nonblocking status across dup/fork without changing
+host fd flags. WouldBlock from an output callback becomes guest EAGAIN for a
+nonblocking descriptor or a cancellable scheduler wait otherwise; partial writes
+retain their counts. Individual transfers are bounded to 64 KiB. A host Write
+callback that blocks inside its implementation still cannot be interrupted.
+The page-based decoder and bulk-copy path retain permission/page-boundary checks
+and self-modifying code behavior; the pinned Node version probe dropped from
+about 16 seconds to 4 seconds on this development host.
