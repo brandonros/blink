@@ -20,6 +20,10 @@ pub struct Ready {
 }
 impl Tcp {
     pub fn new(ipv6: bool) -> io::Result<Self> {
+        #[cfg(target_vendor = "apple")]
+        let flags = SocketFlags::empty();
+        #[cfg(not(target_vendor = "apple"))]
+        let flags = SocketFlags::NONBLOCK | SocketFlags::CLOEXEC;
         let fd = net::socket_with(
             if ipv6 {
                 AddressFamily::INET6
@@ -27,11 +31,16 @@ impl Tcp {
                 AddressFamily::INET
             },
             SocketType::STREAM,
-            SocketFlags::NONBLOCK | SocketFlags::CLOEXEC,
+            flags,
             Some(net::ipproto::TCP),
         )?;
         #[cfg(target_vendor = "apple")]
-        sockopt::set_socket_nosigpipe(&fd, true)?;
+        {
+            // Darwin does not accept Linux's SOCK_NONBLOCK/SOCK_CLOEXEC bits.
+            rustix::fs::fcntl_setfl(&fd, rustix::fs::OFlags::NONBLOCK)?;
+            rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC)?;
+            sockopt::set_socket_nosigpipe(&fd, true)?;
+        }
         Ok(Self { fd })
     }
     /// True means connected; false means a nonblocking connection is pending.

@@ -11,7 +11,7 @@ import gzip
 import hashlib
 import io
 import json
-import shutil
+from smoke_support import copy_root
 import subprocess
 import tarfile
 import tempfile
@@ -71,7 +71,7 @@ datahash = {hashlib.sha256(data).hexdigest()}
 results = []
 with tempfile.TemporaryDirectory(prefix='blink-apk-') as temporary:
     root = Path(temporary) / 'root'
-    shutil.copytree(args.root, root, symlinks=True)
+    copy_root(args.root, root)
     installed = {line[2:] for line in (root / 'lib/apk/db/installed').read_text().splitlines() if line.startswith('P:')}
     before = (root / 'etc/apk/world').read_text().splitlines()
     candidates = sorted(installed - set(before))

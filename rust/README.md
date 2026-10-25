@@ -172,7 +172,7 @@ The preexisting C executable, config, clean-build log and hash manifest are in
 `/workspace/work/blink-baseline`. The clean reference build uses the separate
 `o/rust-reference` directory. On this Linux x86_64 host, Rust, C interpreter and
 native Linux agree on the original fixtures, filesystem/sendfile, and signal
-restart. All 13 fixtures pass Rust/native. C differs on vfork memory sharing and
+restart. All 14 fixtures pass Rust/native. C differs on vfork memory sharing and
 returns extra F_GETFL flags on a CLOEXEC pipe in the descriptor fixture. C JIT fails the pipe/fork
 fixture and crashes during the exec fixture, including after a clean rebuild.
 Those failures remain visible; C is a comparison target, not an infallible oracle.
@@ -187,7 +187,13 @@ The smoke report also records the BusyBox executable hash.
 Linux additionally runs the original assembly subset and Rust/native differential
 fixtures. `--rust-native-only` deliberately selects those two engines for CI;
 the default differential command still reports every C baseline difference.
-The macOS job is a validation gate, not a claim that agent-platform builds pass.
+Both hosts also prepare the pinned AMD64 Alpine fixture with
+`python3 rust/alpine-fixture.py --root target/amd64-alpine` and run dynamic musl,
+seven builder examples, rootless metadata persistence, and seven offline APK
+checks. The fixture loader verifies OCI digests and needs no container engine;
+`--layout` reuses an already downloaded OCI layout. macOS copies preserve the
+metadata xattrs using `ditto`. These are validation gates, not a claim that all
+agent-platform checkpoints or OCI export verification pass.
 
 In the current cloud environment, Alpine's package CDN is absent from the
 configured network allowlist. Download/install coverage remains blocked there,

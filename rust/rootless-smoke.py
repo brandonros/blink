@@ -2,7 +2,7 @@
 """Check rootless guest metadata across separate CLI runs and inode aliases."""
 import argparse
 import json
-import shutil
+from smoke_support import copy_root
 import subprocess
 import tempfile
 from pathlib import Path
@@ -10,11 +10,11 @@ repo = Path(__file__).resolve().parent.parent
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--root', type=Path, required=True)
 a = p.parse_args()
-subprocess.run(['cargo','build','--offline','-p','blink-cli'],cwd=repo,check=True)
+subprocess.run(['cargo','build','--release','--offline','-p','blink-cli'],cwd=repo,check=True)
 with tempfile.TemporaryDirectory(prefix='blink-rootless-') as temp:
     root = Path(temp)/'root'
-    shutil.copytree(a.root,root,symlinks=True)
-    prefix = [str(repo/'target/debug/blink-cli'),'--root',str(root),'--rootless-metadata','/bin/sh','-c']
+    copy_root(a.root,root)
+    prefix = [str(repo/'target/release/blink-cli'),'--root',str(root),'--rootless-metadata','/bin/sh','-c']
     scripts = [
         "mkdir /metadata && printf data > /metadata/file && chmod 6750 /metadata/file && chown 123:456 /metadata/file && ln /metadata/file /metadata/hard && mv /metadata/file /metadata/renamed && chmod 000 /metadata/renamed && stat -c '%u:%g:%a' /metadata/hard",
         "stat -c '%u:%g:%a' /metadata/renamed; cat /metadata/hard",

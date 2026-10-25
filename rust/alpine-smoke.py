@@ -8,7 +8,7 @@ import argparse
 import hashlib
 import json
 import os
-import shutil
+from smoke_support import copy_root
 import subprocess
 import tempfile
 from pathlib import Path
@@ -20,7 +20,7 @@ parser.add_argument('--c-blink', type=Path)
 parser.add_argument('--output', type=Path, default=root/'target/alpine-smoke')
 args = parser.parse_args()
 args.output.mkdir(parents=True, exist_ok=True)
-subprocess.run(['cargo', 'build', '--offline', '-p', 'blink-cli'], cwd=root, check=True)
+subprocess.run(['cargo', 'build', '--release', '--offline', '-p', 'blink-cli'], cwd=root, check=True)
 cases = [
     ('echo', 'echo shell-hello', b'shell-hello\n'),
     ('pipeline', 'printf pipeline | /bin/cat; /bin/true; echo status:$?', b'pipelinestatus:0\n'),
@@ -31,8 +31,8 @@ results = []
 for engine in ['rust'] + (['c-interpreter'] if args.c_blink else []):
     with tempfile.TemporaryDirectory(prefix='blink-alpine-') as temp:
         guest = Path(temp)/'root'
-        shutil.copytree(args.root, guest, symlinks=True)
-        prefix = [str(root/'target/debug/blink-cli'), '--root', str(guest)] if engine == 'rust' else [str(args.c_blink.resolve()), '-m', '-j']
+        copy_root(args.root, guest)
+        prefix = [str(root/'target/release/blink-cli'), '--root', str(guest)] if engine == 'rust' else [str(args.c_blink.resolve()), '-m', '-j']
         for name, script, expected in cases:
             command = prefix + ['/bin/sh', '-c', script]
             try:

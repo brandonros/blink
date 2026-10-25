@@ -20,3 +20,5 @@ blink.log
 /third_party/cosmo/**/*.dbg
 
 /target
+
+/rust/__pycache__/

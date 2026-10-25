@@ -34,6 +34,28 @@ jobs:
           python3 rust/differential.py --rust-native-only
           python3 rust/float-regressions.py
           python3 rust/tcp-smoke.py
+      - uses: actions/checkout@v4
+        with:
+          repository: brandonros/linux-oci-builder
+          ref: 02d15f5826de5cbc90895b6c973730eeb297505e
+          path: work/builder
+      - name: Prepare pinned AMD64 Alpine fixture without a container engine
+        run: python3 rust/alpine-fixture.py --root target/amd64-alpine
+      - name: Run dynamic musl, builder commands, rootless metadata and offline APK
+        run: |
+          python3 rust/alpine-smoke.py --root target/amd64-alpine
+          python3 rust/builder-smoke.py --root target/amd64-alpine --builder work/builder
+          python3 rust/rootless-smoke.py --root target/amd64-alpine
+          python3 rust/apk-smoke.py --root target/amd64-alpine
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rust-workloads-${{ runner.os }}
+          path: |
+            target/alpine-smoke/results.json
+            target/builder-smoke/results.json
+            target/rootless-smoke/results.json
+            target/apk-smoke/results.json
       - uses: actions/upload-artifact@v4
         if: always() && runner.os == 'Linux'
         with:
