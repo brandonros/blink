@@ -630,9 +630,9 @@ that cannot be represented by a single blanket “unmasked means no write” rul
 The pinned Debian bookworm AMD64 manifest is
 `sha256:ec31d744f83f4a73447ba045aaab9409997efe5cc706eca4890c1be36cc1606a`.
 Download it through linux-oci-builder, extract it with `rust/debian-fixture.py`,
-and run `python3 rust/debian-smoke.py --root ROOT`. Its six gates cover glibc 2.36,
+and run `python3 rust/debian-smoke.py --root ROOT`. Its seven gates cover glibc 2.36,
 shell exec/wait, forked sort/uniq pipelines, numeric formatting, rootless ownership
-and modes, and GNU tar's POSIX archive round trip. CI runs these on Linux and
+and modes, coreutils copy/compare, and GNU tar's POSIX archive round trip. CI runs these on Linux and
 Apple Silicon. The fixture loader verifies manifest/config/layer digests and
 sizes; it is deliberately not a general OCI assembler.
 
@@ -643,3 +643,12 @@ directory O_NONBLOCK state survives dup/fork and fcntl/ioctl updates; O_NOCTTY a
 AT_NO_AUTOMOUNT have no operational effect on the guest filesystem. statx remains
 explicitly unavailable (ENOSYS), allowing glibc's fstatat fallback. A native ABI
 fixture checks these paths independently of the Debian workloads.
+
+Directory-only O_PATH handles support stat, duplication, close-on-exec and
+relative path operations while rejecting data I/O, directory enumeration and
+fd mutations with EBADF; polling reports POLLNVAL. General file/symlink O_PATH
+handles remain unsupported. mincore reports guest-backed residency (including
+unbacked reservations and file-EOF holes) rather than host page-cache state.
+FICLONE and copy_file_range report explicit unavailability, so GNU cp uses its
+ordinary byte-copy fallback. Native ABI checks and the Debian copy/compare gate
+cover these paths.

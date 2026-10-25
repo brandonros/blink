@@ -380,6 +380,11 @@ impl Memory {
             .count()
             * 4096
     }
+    pub fn resident(&self, address: u64) -> Option<bool> {
+        self.pages
+            .get(&(address / PAGE))
+            .map(|page| page.bytes.is_some() && !page.bus_fault)
+    }
     pub fn mapped_in_range(&self, address: u64, size: u64) -> usize {
         if size == 0 {
             return 0;

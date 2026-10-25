@@ -86,10 +86,7 @@ pub enum Fd {
     Internet(Rc<RefCell<InternetSocket>>),
     Socket(Rc<Socket>),
     Virtual(Rc<RefCell<VirtualOpen>>),
-    Directory(
-        Rc<RefCell<blink_host::Directory>>,
-        Rc<std::cell::Cell<bool>>,
-    ),
+    Directory(Rc<RefCell<blink_host::Directory>>, Rc<std::cell::Cell<u64>>),
     UnixSocket {
         inode: u64,
         nonblock: bool,
@@ -161,6 +158,9 @@ impl Drop for Fd {
 }
 
 impl Fd {
+    pub fn path_only(&self) -> bool {
+        matches!(self, Self::Directory(_, flags) if flags.get() & 0x200000 != 0)
+    }
     pub fn duplicate(&self) -> Self {
         let mut fd = self.clone();
         if let Self::File { cloexec, .. } = &mut fd {

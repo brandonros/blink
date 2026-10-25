@@ -20,6 +20,7 @@ cases = [
     ('pipeline', ['/bin/sh', '-c', "printf 'pear\\napple\\npear\\n' | sort | uniq"], b'apple\npear\n'),
     ('float-format', ['/usr/bin/printf', '%.8f\n', '0.1'], b'0.10000000\n'),
     ('metadata', ['/bin/sh', '-ec', 'mkdir -p /work; printf "archive-test\\n" > /work/message; chown 123:456 /work/message; chmod 400 /work/message; stat -c "%u:%g:%a" /work/message'], b'123:456:400\n'),
+    ('coreutils-copy', ['/bin/sh', '-ec', 'cp /work/message /work/copied; cmp /work/message /work/copied; cat /work/copied'], b'archive-test\n'),
     ('gnu-tar', ['/bin/sh', '-ec', 'tar --format=posix --numeric-owner --sort=name -cf /work/archive.tar -C /work message; mkdir /work/restored; tar -xpf /work/archive.tar -C /work/restored; stat -c "%u:%g:%a" /work/restored/message; cat /work/restored/message'], b'123:456:400\narchive-test\n'),
 ]
 rows = []

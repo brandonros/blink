@@ -501,6 +501,38 @@ pub(super) fn run(
                         _ => u64::MAX,
                     },
                 };
+                let path_fd = process
+                    .fds
+                    .borrow()
+                    .get(&(args[0] as i32))
+                    .is_some_and(Fd::path_only);
+                if path_fd
+                    && (matches!(
+                        nr,
+                        0 | 1 | 8 | 16..=20 | 40 | 74 | 75 | 77 | 91 | 93 | 217 | 221
+                    ) || nr == 72 && !matches!(args[1], 0..=3 | 1030)
+                        || nr == 280 && args[1] == 0)
+                {
+                    process.cpu.cpu().set_result(errno(9));
+                    continue;
+                }
+                let other_path_fd = if nr == 40 {
+                    Some(args[1])
+                } else if nr == 233 {
+                    Some(args[2])
+                } else {
+                    None
+                };
+                if other_path_fd.is_some_and(|fd| {
+                    process
+                        .fds
+                        .borrow()
+                        .get(&(fd as i32))
+                        .is_some_and(Fd::path_only)
+                }) {
+                    process.cpu.cpu().set_result(errno(9));
+                    continue;
+                }
                 let ret = match nr {
                     36..=38 => time::interval(&process, nr, args)?,
                     96 | 201 | 228 | 229 => time::clock(&process, nr, args)?,
@@ -1200,13 +1232,17 @@ pub(super) fn run(
                                                     status.set(flag != 0);
                                                     0
                                                 }
-                                                Some(
-                                                    Fd::Directory(_, status)
-                                                    | Fd::File {
-                                                        nonblock: status, ..
-                                                    },
-                                                ) => {
+                                                Some(Fd::File {
+                                                    nonblock: status, ..
+                                                }) => {
                                                     status.set(flag != 0);
+                                                    0
+                                                }
+                                                Some(Fd::Directory(_, status)) => {
+                                                    status.set(
+                                                        (status.get() & !0x800)
+                                                            | if flag != 0 { 0x800 } else { 0 },
+                                                    );
                                                     0
                                                 }
                                                 Some(Fd::Reader(p)) => {
@@ -1234,6 +1270,7 @@ pub(super) fn run(
                                         }
                                     }
                                 }
+                                0x40049409 => errno(95), // FICLONE is unavailable; callers may copy bytes.
                                 // The embedded runtime exposes byte streams, not terminals.
                                 0x5401 | 0x5402 | 0x5403 | 0x5404 | 0x5413 | 0x5414 => errno(25),
                                 _ => return Err(Error::UnsupportedSyscall(number)),
@@ -1313,9 +1350,7 @@ pub(super) fn run(
                                             0
                                         }
                                     }
-                                    Fd::Directory(_, status) => {
-                                        0x18000 | if status.get() { 0x800 } else { 0 }
-                                    }
+                                    Fd::Directory(_, status) => status.get(),
                                     Fd::Internet(s) => {
                                         2 | if s.borrow().nonblock { 0x800 } else { 0 }
                                     }
@@ -1367,7 +1402,7 @@ pub(super) fn run(
                                         0
                                     }
                                     Fd::Directory(_, status) => {
-                                        status.set(args[2] & 0x800 != 0);
+                                        status.set((status.get() & !0x800) | (args[2] & 0x800));
                                         0
                                     }
                                     Fd::File {
@@ -1776,7 +1811,7 @@ pub(super) fn run(
                             0
                         }
                     }
-                    332 | 334 => errno(38), // statx/rseq are unavailable; libc may use its documented fallback.
+                    326 | 332 | 334 => errno(38), // copy_file_range/statx/rseq: callers may use documented fallbacks.
                     318 => {
                         if args[2] & !3 != 0 {
                             errno(22)
@@ -2103,6 +2138,39 @@ pub(super) fn run(
                         }
                         continue;
                     }
+                    27 => {
+                        if args[0] & 4095 != 0 {
+                            errno(22)
+                        } else if let Some(size) = args[1].checked_add(4095).map(|n| n & !4095) {
+                            let mut memory = process.memory.borrow_mut();
+                            if args[0]
+                                .checked_add(size)
+                                .is_none_or(|end| end > 0x800000000000)
+                                || memory.mapped_in_range(args[0], size) as u64 != size
+                            {
+                                errno(12)
+                            } else {
+                                let count = (size / 4096) as usize;
+                                if memory.check(args[2], count, Access::Write).is_err() {
+                                    errno(14)
+                                } else {
+                                    let resident: Vec<u8> = (0..count)
+                                        .map(|n| {
+                                            u8::from(
+                                                memory
+                                                    .resident(args[0] + n as u64 * 4096)
+                                                    .unwrap_or(false),
+                                            )
+                                        })
+                                        .collect();
+                                    memory.write(args[2], &resident)?;
+                                    0
+                                }
+                            }
+                        } else {
+                            errno(12)
+                        }
+                    }
                     204 => {
                         let target = args[0] as u32;
                         if target != 0 && target != pid && !processes.contains_key(&target) {
@@ -2209,9 +2277,13 @@ pub(super) fn run(
                                         | 0x8000
                                         | 0x10000
                                         | 0x20000
-                                        | 0x80000)
+                                        | 0x80000
+                                        | 0x200000)
                                     != 0
                                 {
+                                    return Err(Error::UnsupportedSyscall(number));
+                                }
+                                if flags & 0x200000 != 0 && flags & 0x10000 == 0 {
                                     return Err(Error::UnsupportedSyscall(number));
                                 }
                                 let existing = blink_host::path_stat(
@@ -2229,7 +2301,7 @@ pub(super) fn run(
                                 } else if flags & 0x20000 != 0
                                     && existing.is_some_and(|s| s.mode & 0o170000 == 0o120000)
                                 {
-                                    errno(40)
+                                    errno(if flags & 0x200000 != 0 { 20 } else { 40 })
                                 } else if let Some(fd) = process.fd() {
                                     match open_file(
                                         config,
@@ -3386,7 +3458,11 @@ fn open_file(
                 path,
                 config.rootfs.clone(),
             )?)),
-            Rc::new(Cell::new(flags & 0x800 != 0)),
+            Rc::new(Cell::new(if flags & 0x200000 != 0 {
+                flags & 0x230000
+            } else {
+                0x18000 | (flags & 0x20800)
+            })),
         ));
     }
     if flags & 0x10000 != 0 && !path.is_dir() {
@@ -3909,6 +3985,9 @@ fn pipe_writev(
 }
 
 fn poll_events(fd: Option<&Fd>, wanted: u16) -> u16 {
+    if fd.is_some_and(Fd::path_only) {
+        return 32;
+    }
     let available = match fd {
         Some(Fd::Counter(c)) => poll::counter_events(&c.borrow()),
         Some(Fd::Epoll(e)) => u16::from(poll::readable(&e.borrow())),
