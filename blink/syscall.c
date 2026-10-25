@@ -17,6 +17,7 @@
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include "blink/syscall.h"
+#include "blink/rootless.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -5092,22 +5093,41 @@ static int SysGetppid(struct Machine *m) {
 }
 
 static int SysGetuid(struct Machine *m) {
+  if (RootlessEnabled()) return RootlessGetId(0, ROOTLESS_REAL);
   return getuid();
 }
 
 static int SysGetgid(struct Machine *m) {
+  if (RootlessEnabled()) return RootlessGetId(1, ROOTLESS_REAL);
   return getgid();
 }
 
 static int SysGeteuid(struct Machine *m) {
+  if (RootlessEnabled()) return RootlessGetId(0, ROOTLESS_EFFECTIVE);
   return geteuid();
 }
 
 static int SysGetegid(struct Machine *m) {
+  if (RootlessEnabled()) return RootlessGetId(1, ROOTLESS_EFFECTIVE);
   return getegid();
 }
 
 static i32 SysGetgroups(struct Machine *m, i32 size, i64 addr) {
+  if (RootlessEnabled()) {
+    unsigned *groups;
+    int count;
+    if (size < 0) return einval();
+    if (!size) return RootlessGetgroups(0, NULL);
+    if (!(groups = AddToFreeList(m, malloc(MIN(size, 65536) * sizeof(*groups))))) return -1;
+    if ((count = RootlessGetgroups(size, groups)) == -1) return -1;
+    if (count && !IsValidMemory(m, addr, (size_t)count * 4, PROT_WRITE)) return -1;
+    for (int i = 0; i < count; ++i) {
+      u8 word[4];
+      Write32(word, groups[i]);
+      CopyToUserWrite(m, addr + (size_t)i * 4, word, 4);
+    }
+    return count;
+  }
   gid_t *group;
   u8 i32buf[4];
   int i, ngroups;
@@ -5139,6 +5159,16 @@ static i32 SysGetgroups(struct Machine *m, i32 size, i64 addr) {
 }
 
 static i32 SysSetgroups(struct Machine *m, i32 size, i64 addr) {
+  if (RootlessEnabled()) {
+    unsigned *groups;
+    const u8 *source;
+    if (size < 0 || size > 65536) return einval();
+    if (!size) return RootlessSetgroups(0, NULL);
+    if (!(source = (const u8 *)SchlepR(m, addr, (size_t)size * 4))) return -1;
+    if (!(groups = AddToFreeList(m, malloc(size * sizeof(*groups))))) return -1;
+    for (int i = 0; i < size; ++i) groups[i] = Read32(source + (size_t)i * 4);
+    return RootlessSetgroups(size, groups);
+  }
 #ifdef HAVE_SETGROUPS
   int i;
   gid_t *group;
@@ -5160,6 +5190,7 @@ static i32 SysSetresuid(struct Machine *m,  //
                         u32 real,           //
                         u32 effective,      //
                         u32 saved) {
+  if (RootlessEnabled()) return RootlessSetResId(0, real, effective, saved);
 #ifdef HAVE_SETRESUID
   return setresuid(real, effective, saved);
 #elif defined(HAVE_SETREUID)
@@ -5179,6 +5210,7 @@ static i32 SysSetresgid(struct Machine *m,  //
                         u32 real,           //
                         u32 effective,      //
                         u32 saved) {
+  if (RootlessEnabled()) return RootlessSetResId(1, real, effective, saved);
 #ifdef HAVE_SETRESGID
   return setresgid(real, effective, saved);
 #elif defined(HAVE_SETREGID)
@@ -5195,6 +5227,7 @@ static i32 SysSetresgid(struct Machine *m,  //
 }
 
 static int SysSetreuid(struct Machine *m, u32 real, u32 effective) {
+  if (RootlessEnabled()) return RootlessSetReId(0, real, effective);
 #ifdef HAVE_SETRESUID
   // If the real user ID is set (i.e., ruid is not -1) or the effective
   // user ID is set to a value not equal to the previous real user ID,
@@ -5212,6 +5245,7 @@ static int SysSetreuid(struct Machine *m, u32 real, u32 effective) {
 }
 
 static int SysSetregid(struct Machine *m, u32 real, u32 effective) {
+  if (RootlessEnabled()) return RootlessSetReId(1, real, effective);
 #ifdef HAVE_SETRESUID
   if (real != -1 || (effective != -1 && effective != getgid())) {
     if (effective == -1) effective = getegid();
@@ -5236,6 +5270,15 @@ static i32 SysGetresuid(struct Machine *m,  //
       (savedaddr && !(saved = (u8 *)SchlepW(m, savedaddr, 4))) ||
       (effectiveaddr && !(effective = (u8 *)SchlepW(m, effectiveaddr, 4)))) {
     return -1;
+  }
+  if (RootlessEnabled()) {
+    unsigned ids[4];
+    if (!real || !effective || !saved) return efault();
+    RootlessGetIds(0, ids);
+    Write32(real, ids[ROOTLESS_REAL]);
+    Write32(effective, ids[ROOTLESS_EFFECTIVE]);
+    Write32(saved, ids[ROOTLESS_SAVED]);
+    return 0;
   }
 #ifdef HAVE_SETRESUID
   if (getresuid(&uid, &euid, &suid) == -1) return -1;
@@ -5263,6 +5306,15 @@ static i32 SysGetresgid(struct Machine *m,  //
       (effectiveaddr && !(effective = (u8 *)SchlepW(m, effectiveaddr, 4)))) {
     return -1;
   }
+  if (RootlessEnabled()) {
+    unsigned ids[4];
+    if (!real || !effective || !saved) return efault();
+    RootlessGetIds(1, ids);
+    Write32(real, ids[ROOTLESS_REAL]);
+    Write32(effective, ids[ROOTLESS_EFFECTIVE]);
+    Write32(saved, ids[ROOTLESS_SAVED]);
+    return 0;
+  }
 #ifdef HAVE_SETRESUID
   if (getresgid(&gid, &egid, &sgid) == -1) return -1;
 #else
@@ -5289,11 +5341,23 @@ static int SysUmask(struct Machine *m, int mask) {
 }
 
 static int SysSetuid(struct Machine *m, int uid) {
+  if (RootlessEnabled()) return RootlessSetId(0, uid);
   return setuid(uid);
 }
 
 static int SysSetgid(struct Machine *m, int gid) {
+  if (RootlessEnabled()) return RootlessSetId(1, gid);
   return setgid(gid);
+}
+
+static i64 SysSetfsuid(struct Machine *m, u32 uid) {
+  if (RootlessEnabled()) return RootlessSetFsId(0, uid);
+  return enosys();
+}
+
+static i64 SysSetfsgid(struct Machine *m, u32 gid) {
+  if (RootlessEnabled()) return RootlessSetFsId(1, gid);
+  return enosys();
 }
 
 static int SysGetpgid(struct Machine *m, int pid) {
@@ -5656,6 +5720,8 @@ void OpSyscall(P) {
     SYSCALL(0, 0x070, "setsid", SysSetsid, STRACE_SETSID);
     SYSCALL(2, 0x073, "getgroups", SysGetgroups, STRACE_2);
     SYSCALL(1, 0x079, "getpgid", SysGetpgid, STRACE_GETPGID);
+    SYSCALL(1, 0x07A, "setfsuid", SysSetfsuid, STRACE_SETUID);
+    SYSCALL(1, 0x07B, "setfsgid", SysSetfsgid, STRACE_SETGID);
     SYSCALL(1, 0x07C, "getsid", SysGetsid, STRACE_1);
     SYSCALL(1, 0x07F, "rt_sigpending", SysSigpending, STRACE_1);
     SYSCALL(2, 0x089, "statfs", SysStatfs, STRACE_2);

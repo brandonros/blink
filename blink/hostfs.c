@@ -34,6 +34,7 @@
 #include "blink/macros.h"
 #include "blink/syscall.h"
 #include "blink/vfs.h"
+#include "blink/rootless.h"
 
 #ifndef DISABLE_VFS
 
@@ -152,6 +153,7 @@ int HostfsFreeInfo(void *info) {
     return 0;
   }
   VFS_LOGF("HostfsFreeInfo(%p)", info);
+  RootlessAnonFree(hostfsinfo->rootless_anon);
   if (S_ISDIR(hostfsinfo->mode)) {
     if (hostfsinfo->dirstream) {
       unassert(!closedir(hostfsinfo->dirstream));
@@ -190,6 +192,7 @@ int HostfsCreateInfo(struct HostfsInfo **output) {
     return 0;
   }
   (*output)->mode = 0;
+  (*output)->rootless_anon = NULL;
   (*output)->socketfamily = 0;
   (*output)->filefd = -1;
   (*output)->dirstream = NULL;
@@ -559,12 +562,16 @@ cleananddie:
 
 int HostfsMkdir(struct VfsInfo *parent, const char *name, mode_t mode) {
   int hostfd;
+  struct RootlessOwner owner;
   char hostname[VFS_PATH_MAX];
   VFS_LOGF("HostfsMkdir(%p, \"%s\", %d)", parent, name, mode);
   if (HostfsGetOptimalDirFdName(parent, name, &hostfd, hostname) == -1) {
     return -1;
   }
-  return mkdirat(hostfd, hostname, mode);
+  if (RootlessPrepare(hostfd, hostname, &owner)) return -1;
+  if (owner.setgid) mode |= S_ISGID;
+  if (mkdirat(hostfd, hostname, mode)) return -1;
+  return RootlessCreate(hostfd, hostname, AT_SYMLINK_NOFOLLOW, &owner, mode);
 }
 
 int HostfsMkfifo(struct VfsInfo *parent, const char *name, mode_t mode) {
@@ -599,7 +606,23 @@ int HostfsOpen(struct VfsInfo *parent, const char *name, int flags, int mode,
   if (HostfsCreateInfo(&outputinfo) == -1) {
     goto cleananddie;
   }
-  outputinfo->filefd = openat(hostfd, hostname, flags, mode);
+  if (RootlessEnabled() && (flags & O_CREAT)) {
+    struct RootlessOwner owner;
+    if (RootlessPrepare(hostfd, hostname, &owner)) goto cleananddie;
+    // Discover creation atomically, without overwriting existing ownership.
+    int attempts = 16;
+    do {
+      outputinfo->filefd = openat(hostfd, hostname, flags | O_EXCL, mode);
+      if (outputinfo->filefd != -1) {
+        if (RootlessCreate(outputinfo->filefd, NULL, 0, &owner, mode)) goto cleananddie;
+        break;
+      }
+      if (errno != EEXIST || (flags & O_EXCL)) break;
+      outputinfo->filefd = openat(hostfd, hostname, flags & ~O_CREAT, mode);
+    } while (outputinfo->filefd == -1 && errno == ENOENT && --attempts);
+  } else {
+    outputinfo->filefd = openat(hostfd, hostname, flags, mode);
+  }
   VFS_LOGF("HostfsOpen: openat(%d, \"%s\", %d, %d) -> %d, %s", hostfd, hostname,
            flags, mode, outputinfo->filefd, strerror(errno));
   if (outputinfo->filefd == -1) {
@@ -662,6 +685,7 @@ int HostfsStat(struct VfsInfo *parent, const char *name, struct stat *st,
     return -1;
   }
   ret = fstatat(hostfd, hostname, st, flags);
+  if (!ret) ret = RootlessStat(hostfd, hostname, st, flags);
   if (ret != -1) {
     st->st_ino =
         HostfsHash(st->st_dev, (const char *)&st->st_ino, sizeof(st->st_ino));
@@ -736,6 +760,13 @@ int HostfsFstat(struct VfsInfo *info, struct stat *st) {
   }
   hostinfo = (struct HostfsInfo *)info->data;
   ret = fstat(hostinfo->filefd, st);
+  if (!ret) {
+    if (hostinfo->rootless_anon) {
+      RootlessAnonStat(hostinfo->rootless_anon, st);
+    } else {
+      ret = RootlessStat(hostinfo->filefd, NULL, st, 0);
+    }
+  }
   if (ret != -1) {
     st->st_ino =
         HostfsHash(st->st_dev, (const char *)&st->st_ino, sizeof(st->st_ino));
@@ -752,6 +783,7 @@ int HostfsChmod(struct VfsInfo *parent, const char *name, mode_t mode,
   if (HostfsGetOptimalDirFdName(parent, name, &hostfd, hostname) == -1) {
     return -1;
   }
+  if (RootlessEnabled()) return RootlessChmod(hostfd, hostname, mode, flags);
   return fchmodat(hostfd, hostname, mode, flags);
 }
 
@@ -762,6 +794,8 @@ int HostfsFchmod(struct VfsInfo *info, mode_t mode) {
     return efault();
   }
   hostinfo = (struct HostfsInfo *)info->data;
+  if (hostinfo->rootless_anon) return RootlessAnonChmod(hostinfo->rootless_anon, mode);
+  if (RootlessEnabled()) return RootlessChmod(hostinfo->filefd, NULL, mode, 0);
   return fchmod(hostinfo->filefd, mode);
 }
 
@@ -773,6 +807,7 @@ int HostfsChown(struct VfsInfo *parent, const char *name, uid_t uid, gid_t gid,
   if (HostfsGetOptimalDirFdName(parent, name, &hostfd, hostname) == -1) {
     return -1;
   }
+  if (RootlessEnabled()) return RootlessChown(hostfd, hostname, uid, gid, flags);
   return fchownat(hostfd, hostname, uid, gid, flags);
 }
 
@@ -783,6 +818,8 @@ int HostfsFchown(struct VfsInfo *info, uid_t uid, gid_t gid) {
     return efault();
   }
   hostinfo = (struct HostfsInfo *)info->data;
+  if (hostinfo->rootless_anon) return RootlessAnonChown(hostinfo->rootless_anon, uid, gid);
+  if (RootlessEnabled()) return RootlessChown(hostinfo->filefd, NULL, uid, gid, 0);
   return fchown(hostinfo->filefd, uid, gid);
 }
 
@@ -1061,6 +1098,7 @@ int HostfsDup(struct VfsInfo *info, struct VfsInfo **newinfo) {
     goto cleananddie;
   }
   newhostinfo->mode = hostinfo->mode;
+  newhostinfo->rootless_anon = RootlessAnonAcquire(hostinfo->rootless_anon);
   if (S_ISSOCK(hostinfo->mode) && hostinfo->socketaddr != NULL) {
     newhostinfo->socketaddr =
         (struct sockaddr *)malloc(hostinfo->socketaddrlen);
@@ -1115,6 +1153,7 @@ int HostfsDup3(struct VfsInfo *info, struct VfsInfo **newinfo, int flags) {
   }
   newhostinfo->filefd =
       dup3(hostinfo->filefd, open("/dev/null", O_RDONLY), flags);
+  newhostinfo->rootless_anon = RootlessAnonAcquire(hostinfo->rootless_anon);
   if (newhostinfo->filefd == -1) {
     goto cleananddie;
   }
@@ -1657,12 +1696,15 @@ int HostfsFutime(struct VfsInfo *info, const struct timespec times[2]) {
 
 int HostfsSymlink(const char *target, struct VfsInfo *info, const char *name) {
   int hostfd;
+  struct RootlessOwner owner;
   char hostname[VFS_PATH_MAX];
   VFS_LOGF("HostfsSymlink(%s, %p, %s)", target, info, name);
   if (HostfsGetOptimalDirFdName(info, name, &hostfd, hostname) == -1) {
     return -1;
   }
-  return symlinkat(target, hostfd, hostname);
+  if (RootlessPrepare(hostfd, hostname, &owner)) return -1;
+  if (symlinkat(target, hostfd, hostname)) return -1;
+  return RootlessCreate(hostfd, hostname, AT_SYMLINK_NOFOLLOW, &owner, 0777);
 }
 
 void *HostfsMmap(struct VfsInfo *info, void *addr, size_t len, int prot,
@@ -1833,6 +1875,11 @@ int HostfsPipe(struct VfsInfo *infos[2]) {
       goto cleananddie;
     }
   }
+  if (RootlessEnabled()) {
+    struct HostfsInfo *a = infos[0]->data, *b = infos[1]->data;
+    RootlessAnonFree(b->rootless_anon);
+    b->rootless_anon = RootlessAnonAcquire(a->rootless_anon);
+  }
   return 0;
 cleananddie:
   for (i = 0; i < 2; ++i) {
@@ -1863,6 +1910,11 @@ int HostfsPipe2(struct VfsInfo *infos[2], int flags) {
     if (HostfsWrapFd(fds[i], false, &infos[i]) == -1) {
       goto cleananddie;
     }
+  }
+  if (RootlessEnabled()) {
+    struct HostfsInfo *a = infos[0]->data, *b = infos[1]->data;
+    RootlessAnonFree(b->rootless_anon);
+    b->rootless_anon = RootlessAnonAcquire(a->rootless_anon);
   }
   return 0;
 cleananddie:
@@ -1985,6 +2037,9 @@ int HostfsWrapFd(int fd, bool dodup, struct VfsInfo **output) {
   }
   hostinfo->filefd = fd;
   hostinfo->mode = st.st_mode;
+  if (RootlessEnabled() && !S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode)) {
+    if (!(hostinfo->rootless_anon = RootlessAnonNew(st.st_mode))) goto cleananddie;
+  }
   if (VfsCreateInfo(output) == -1) {
     goto cleananddie;
   }
