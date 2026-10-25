@@ -27,8 +27,8 @@ _start:
  mov $1, %edi
  mov $1, %eax
  syscall
- # Child exit must be reaped with the correct wait status.
- mov %r12d, %edi
+ # wait4 takes signed 32-bit pid_t; glibc zero-extends -1 in EDI.
+ mov $-1, %edi
  lea 8(%rsp), %rsi
  xor %edx, %edx
  xor %r10d, %r10d

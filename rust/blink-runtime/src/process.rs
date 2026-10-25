@@ -2686,7 +2686,8 @@ pub(super) fn run(
                         }
                     }
                     61 => {
-                        let wanted = args[0] as i64;
+                        // Linux pid_t is signed 32-bit even in the AMD64 syscall ABI.
+                        let wanted = args[0] as i32 as i64;
                         if args[2] & !1 != 0 || args[3] != 0 || wanted == 0 || wanted < -1 {
                             return Err(Error::UnsupportedSyscall(number));
                         }
