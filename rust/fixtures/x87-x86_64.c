@@ -8,12 +8,12 @@ static const struct extended extended[]={
 {0xc000000000000123ul,0x7fff},{0x8000000000000123ul,0xffff},{1,0},{0x8000000000000000ul,1},
 {0xfffffffffffffffful,0x7ffe},{0x8000000000000000ul,0x3fbf}};
 struct record {unsigned long a,b;unsigned char result[10];unsigned short status,control,op;};
-#define OPERATE(instruction) __asm__ volatile("fninit; fldcw %4; fldl %2; fldl %3; " instruction "; fnstsw %1; fstpt %0; fninit" :"=m"(r.result),"=m"(r.status):"m"(r.a),"m"(r.b),"m"(r.control):"st","st(1)","memory")
-#define OPERATE80(instruction) __asm__ volatile("fninit; fldcw %4; fldt %2; fldt %3; " instruction "; fnstsw %1; fstpt %0; fninit" :"=m"(r.result),"=m"(r.status):"m"(left),"m"(right),"m"(r.control):"st","st(1)","memory")
-#define STORE80(instruction) __asm__ volatile("fninit; fldcw %4; fldt %2; fldt %3; " instruction " %0; fnstsw %1; fninit" :"=m"(r.result),"=m"(r.status):"m"(left),"m"(right),"m"(r.control):"st","st(1)","memory")
+#define OPERATE(instruction) __asm__ volatile("fninit; fldcw %4; fldl %2; fldl %3; " instruction "; fnstsw %1; fstpt %0; fninit" :"=m"(r.result),"=m"(r.status):"m"(r.a),"m"(r.b),"m"(r.control):"st","st(1)","rax","cc","memory")
+#define OPERATE80(instruction) __asm__ volatile("fninit; fldcw %4; fldt %2; fldt %3; " instruction "; fnstsw %1; fstpt %0; fninit" :"=m"(r.result),"=m"(r.status):"m"(left),"m"(right),"m"(r.control):"st","st(1)","rax","cc","memory")
+#define STORE80(instruction) __asm__ volatile("fninit; fldcw %4; fldt %2; fldt %3; " instruction " %0; fnstsw %1; fninit" :"=m"(r.result),"=m"(r.status):"m"(left),"m"(right),"m"(r.control):"st","st(1)","rax","cc","memory")
 #define COMPARE80(instruction) do { __asm__ volatile("fninit; fldcw %4; fldt %2; fldt %3; " instruction "; pushfq; popq %0; fnstsw %1; fninit" :"=m"(r.result),"=m"(r.status):"m"(left),"m"(right),"m"(r.control):"st","st(1)","memory","cc"); r.result[0]&=0xd5;r.result[1]&=8;for(int n=2;n<10;n++)r.result[n]=0; } while(0)
 __attribute__((noreturn)) void _start(void) {
-    for(unsigned op=0;op<23;op++) for(unsigned mode=0;mode<12;mode++) for(unsigned pair=0;pair<169+256;pair++) {
+    for(unsigned op=0;op<25;op++) for(unsigned mode=0;mode<12;mode++) for(unsigned pair=0;pair<169+256;pair++) {
         struct record r={0};r.op=op;r.control=0x7f|((mode<4?0:mode<8?2:3)<<8)|((mode&3)<<10);
         if(pair<169) {r.a=values[pair/13];r.b=values[pair%13];}
         else {
@@ -37,6 +37,8 @@ __attribute__((noreturn)) void _start(void) {
         case 17:STORE80("fistps");break;
         case 21:OPERATE80("fxtract");break;
         case 22:OPERATE80("fxtract; fxch %%st(1)");break;
+        case 23:OPERATE80("1: fprem; fnstsw %%ax; testw $0x400,%%ax; jnz 1b");break;
+        case 24:OPERATE80("1: fprem1; fnstsw %%ax; testw $0x400,%%ax; jnz 1b");break;
         case 20:OPERATE80("fscale");break;
         case 19:OPERATE80("fsqrt");break;
         case 18:STORE80("fisttpq");break;

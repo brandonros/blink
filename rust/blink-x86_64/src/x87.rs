@@ -389,6 +389,8 @@ impl X86 {
                 | Op::FRNDINT
                 | Op::FSQRT
                 | Op::FSCALE
+                | Op::FPREM
+                | Op::FPREM1
                 | Op::FXTRACT
         ) {
             return Ok(false);
@@ -719,6 +721,100 @@ impl X86 {
                     self.fpu.set(0, exponent);
                     self.fpu.top = next;
                     self.fpu.set(0, significand);
+                }
+            }
+            Op::FPREM | Op::FPREM1 => {
+                let mut exceptions = 0;
+                let left = self.fpu.get(0, &mut exceptions);
+                let right = self.fpu.get(1, &mut exceptions);
+                let x = Extended::from_bits(left);
+                let y = Extended::from_bits(right);
+                let unsupported =
+                    |bits: u128| ((bits >> 64) & 0x7fff) != 0 && bits & (1 << 63) == 0;
+                let mut condition = 0;
+                let result = if exceptions != 0 || unsupported(left) || unsupported(right) {
+                    exceptions |= 1;
+                    INDEFINITE
+                } else if x.is_nan() || y.is_nan() {
+                    if x.is_signaling() || y.is_signaling() {
+                        exceptions |= 1;
+                    }
+                    let chosen = if !x.is_nan() {
+                        right
+                    } else if !y.is_nan() {
+                        left
+                    } else if x.is_signaling() != y.is_signaling() {
+                        if x.is_signaling() {
+                            right
+                        } else {
+                            left
+                        }
+                    } else if left as u64 != right as u64 {
+                        if left as u64 > right as u64 {
+                            left
+                        } else {
+                            right
+                        }
+                    } else {
+                        left.min(right)
+                    };
+                    chosen | (1 << 62)
+                } else if x.is_infinite() || y.is_zero() {
+                    exceptions = 1;
+                    INDEFINITE
+                } else {
+                    if x.is_denormal() || y.is_denormal() {
+                        exceptions |= 2;
+                    }
+                    if x.is_zero() || y.is_infinite() {
+                        left
+                    } else {
+                        let normalize = |bits: u128| {
+                            let mut fraction = bits as u64;
+                            let mut exponent = (((bits >> 64) & 0x7fff) as i32).max(1) - 16383;
+                            while fraction & (1 << 63) == 0 {
+                                fraction <<= 1;
+                                exponent -= 1;
+                            }
+                            (fraction as u128, exponent)
+                        };
+                        let (xs, xe) = normalize(left);
+                        let (ys, ye) = normalize(right);
+                        let difference = xe - ye;
+                        if difference >= 64 {
+                            // The ISA permits a reduction width from 32 to 63.
+                            // N=32 keeps discarded quotient bits above bit 31.
+                            condition = 0x400;
+                            x.c_fmod(y.scalbn(difference - 32)).value.to_bits()
+                        } else {
+                            let mut quotient = 0;
+                            if difference >= -1 {
+                                let numerator = xs << difference.max(0);
+                                let denominator = ys << (-difference).max(0);
+                                quotient = numerator / denominator;
+                                let remainder = numerator % denominator;
+                                if op == Op::FPREM1
+                                    && (remainder * 2 > denominator
+                                        || (remainder * 2 == denominator && quotient & 1 != 0))
+                                {
+                                    quotient += 1;
+                                }
+                            }
+                            condition = (((quotient & 4) << 6)
+                                | ((quotient & 1) << 9)
+                                | ((quotient & 2) << 13))
+                                as u16;
+                            if op == Op::FPREM1 {
+                                x.ieee_rem(y).value.to_bits()
+                            } else {
+                                x.c_fmod(y).value.to_bits()
+                            }
+                        }
+                    }
+                };
+                self.fpu.status = (self.fpu.status & !0x4700) | condition;
+                if self.fpu.exception(exceptions) {
+                    self.fpu.set(0, result);
                 }
             }
             Op::FSCALE => {
@@ -1232,6 +1328,38 @@ mod tests {
                 .read(0x2ff0, &mut bytes, blink_core::Access::Read)
                 .unwrap();
             assert_eq!(bytes, [0xa5; 16]);
+        }
+    }
+    #[test]
+    fn remainder_reduction_reports_incomplete_and_preserves_unmasked_invalid() {
+        for op in [Op::FPREM, Op::FPREM1] {
+            let (mut cpu, mut memory) = machine(&[0xd9, 0xf8]);
+            let x = Extended::from_bits(0x7ffe_fedc_ba98_7654_3210);
+            let y = Extended::from_bits(3);
+            cpu.fpu.set(0, x.to_bits());
+            cpu.fpu.set(1, y.to_bits());
+            cpu.x87(&mut memory, op, None, None, 0x1000).unwrap();
+            assert_eq!(cpu.fpu.status() & 0x400, 0x400);
+            let mut steps = 1;
+            while cpu.fpu.status() & 0x400 != 0 {
+                assert!(steps < 2048);
+                cpu.x87(&mut memory, op, None, None, 0x1000).unwrap();
+                steps += 1;
+            }
+            let expected = if op == Op::FPREM {
+                x.c_fmod(y)
+            } else {
+                x.ieee_rem(y)
+            };
+            assert_eq!(cpu.fpu.get(0, &mut 0), expected.value.to_bits());
+            assert_eq!(cpu.fpu.status() & 32, 0);
+            cpu.fpu = Fpu::default();
+            cpu.fpu.set(0, x.to_bits());
+            cpu.fpu.set(1, 0);
+            cpu.fpu.control &= !1;
+            cpu.x87(&mut memory, op, None, None, 0x1000).unwrap();
+            assert_eq!(cpu.fpu.get(0, &mut 0), x.to_bits());
+            assert_eq!(cpu.fpu.status() & 0x8081, 0x8081);
         }
     }
     #[test]

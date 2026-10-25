@@ -290,7 +290,7 @@ loads/stores, and stack operations. Signal handlers start with a fresh x87 state
 sigreturn restores the saved stack and control word. An unmasked exception
 preserves the destination/stack and faults on the next waiting instruction.
 
-`python3 rust/x87-regressions.py` compares 166,698 native AMD64 result/status records,
+`python3 rust/x87-regressions.py` compares 176,898 native AMD64 result/status records,
 including 80-bit extrema, NaNs, denormals, all three precision controls, four rounding modes, comparisons and
 conversions. Tests also cover a ten-byte source at a page boundary, masked stack
 overflow, deferred faults, and signal-frame preservation. The adapter handles
@@ -479,7 +479,7 @@ ZF-only updates and CX16 alignment checks. CPUID advertises CX8/CX16 after
 native comparisons and fault-state tests; CI replays the fixture on Darwin arm64.
 
 FSQRT uses a 128-bit integer radicand and exact remainder, rounding directly
-to the selected 24/53/64-bit significand. The x87 oracle now compares 166,698
+to the selected 24/53/64-bit significand. The x87 oracle now compares 176,898
 records, including 49,248 extra square-root cases with extended-format edge
 encodings, exponent extremes, random significands and all rounding/precision
 controls. Empty-stack and deferred unmasked-invalid behavior have focused tests.
@@ -502,3 +502,9 @@ and overflow/underflow flags, without narrowing to the precision-control width.
 FXTRACT produces both the signed significand and exponent, including zeros,
 infinities, NaNs and denormals. Native tests cover both outputs and both stack
 overflow destinations; unmasked overflow leaves both destinations unchanged.
+
+FPREM/FPREM1 implement truncating and nearest-even remainder with quotient
+condition codes. Large exponent gaps use the ISA-permitted 32-bit partial
+reduction and set C2 until complete; intermediate reductions need not match a
+particular physical CPU. Native comparisons loop to completion and compare
+final remainder bits, quotient flags, denormals, NaNs and invalid operations.
