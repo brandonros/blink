@@ -49,12 +49,19 @@ impl SignalStack {
         }
     }
 }
+#[derive(Clone, Copy, Default)]
+pub struct SignalInfo {
+    pub sender: u32,
+    pub uid: u32,
+    pub code: i32,
+    pub status: i32,
+}
 pub struct SignalContext {
     pub signal: u32,
     pub handler: u64,
     pub restorer: u64,
     pub mask: u64,
-    pub sender: u32,
+    pub info: SignalInfo,
     pub stack: SignalStack,
     pub use_stack: bool,
 }
@@ -76,7 +83,10 @@ impl X86 {
                 handler,
                 restorer,
                 mask,
-                sender,
+                info: SignalInfo {
+                    sender,
+                    ..Default::default()
+                },
                 stack: SignalStack::default(),
                 use_stack: false,
             },
@@ -92,7 +102,7 @@ impl X86 {
             handler,
             restorer,
             mask,
-            sender,
+            info,
             stack,
             use_stack,
         } = context;
@@ -126,7 +136,10 @@ impl X86 {
         put(&mut frame, UC + 208, mask);
         put(&mut frame, UC + 296, mask);
         put(&mut frame, INFO, signal as u64);
-        put(&mut frame, INFO + 16, sender as u64);
+        frame[INFO + 8..INFO + 12].copy_from_slice(&info.code.to_le_bytes());
+        frame[INFO + 16..INFO + 20].copy_from_slice(&info.sender.to_le_bytes());
+        frame[INFO + 20..INFO + 24].copy_from_slice(&info.uid.to_le_bytes());
+        frame[INFO + 24..INFO + 28].copy_from_slice(&info.status.to_le_bytes());
         put(&mut frame, UC + 224, sp + 440);
         frame[440..442].copy_from_slice(&0x37fu16.to_le_bytes());
         frame[464..468].copy_from_slice(&self.mxcsr.to_le_bytes());

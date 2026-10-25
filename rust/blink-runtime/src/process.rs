@@ -80,9 +80,9 @@ struct Process {
     robust_head: u64,
     actions: Rc<RefCell<[SignalAction; 64]>>,
     signal_mask: u64,
+    suspend_mask: Option<u64>,
     signal_stack: blink_x86_64::SignalStack,
-    pending_signals: u64,
-    signal_senders: [u32; 64],
+    signals: signals::Pending,
     futex: Option<u64>,
     futex_syscall: Option<u64>,
     poll_deadline: Option<Instant>,
@@ -260,9 +260,9 @@ pub(super) fn run(
             robust_head: 0,
             actions: Rc::new(RefCell::new([SignalAction::default(); 64])),
             signal_mask: 0,
+            suspend_mask: None,
             signal_stack: blink_x86_64::SignalStack::default(),
-            pending_signals: 0,
-            signal_senders: [0; 64],
+            signals: signals::Pending::default(),
             futex: None,
             futex_syscall: None,
             poll_deadline: None,
@@ -308,15 +308,30 @@ pub(super) fn run(
                     .values_mut()
                     .find(|p| p.group == process.group && p.signal_mask & alarm == 0)
                 {
-                    target.pending_signals |= alarm;
-                    target.signal_senders[13] = 0;
+                    target.signals.enqueue(
+                        13,
+                        blink_x86_64::SignalInfo {
+                            code: 128,
+                            ..Default::default()
+                        },
+                    );
                 } else {
-                    process.pending_signals |= alarm;
-                    process.signal_senders[13] = 0;
+                    process.signals.enqueue(
+                        13,
+                        blink_x86_64::SignalInfo {
+                            code: 128,
+                            ..Default::default()
+                        },
+                    );
                 }
             } else {
-                process.pending_signals |= alarm;
-                process.signal_senders[13] = 0;
+                process.signals.enqueue(
+                    13,
+                    blink_x86_64::SignalInfo {
+                        code: 128,
+                        ..Default::default()
+                    },
+                );
             }
         }
         let mut event = Event::Ready;
@@ -786,8 +801,14 @@ pub(super) fn run(
                                     }
                                     Some(result) => {
                                         if result == errno(32) && args[3] & 0x4000 == 0 {
-                                            process.pending_signals |= 1 << 12;
-                                            process.signal_senders[12] = process.group;
+                                            process.signals.enqueue(
+                                                12,
+                                                blink_x86_64::SignalInfo {
+                                                    sender: process.group,
+                                                    uid: process.credentials.uid,
+                                                    ..Default::default()
+                                                },
+                                            );
                                         }
                                         result
                                     }
@@ -870,8 +891,14 @@ pub(super) fn run(
                                     }
                                     Some(result) => {
                                         if result == errno(32) && args[3] & 0x4000 == 0 {
-                                            process.pending_signals |= 1 << 12;
-                                            process.signal_senders[12] = process.group;
+                                            process.signals.enqueue(
+                                                12,
+                                                blink_x86_64::SignalInfo {
+                                                    sender: process.group,
+                                                    uid: process.credentials.uid,
+                                                    ..Default::default()
+                                                },
+                                            );
                                         }
                                         result
                                     }
@@ -894,8 +921,14 @@ pub(super) fn run(
                                     }
                                     Some(result) => {
                                         if result == errno(32) && args[3] & 0x4000 == 0 {
-                                            process.pending_signals |= 1 << 12;
-                                            process.signal_senders[12] = process.group;
+                                            process.signals.enqueue(
+                                                12,
+                                                blink_x86_64::SignalInfo {
+                                                    sender: process.group,
+                                                    uid: process.credentials.uid,
+                                                    ..Default::default()
+                                                },
+                                            );
                                         }
                                         result
                                     }
@@ -1059,8 +1092,14 @@ pub(super) fn run(
                     40 => match send_file(&process, args, stdout, stderr)? {
                         Some(result) => {
                             if result == errno(32) {
-                                process.pending_signals |= 1 << 12;
-                                process.signal_senders[12] = process.group;
+                                process.signals.enqueue(
+                                    12,
+                                    blink_x86_64::SignalInfo {
+                                        sender: process.group,
+                                        uid: process.credentials.uid,
+                                        ..Default::default()
+                                    },
+                                );
                             }
                             result
                         }
@@ -1285,8 +1324,14 @@ pub(super) fn run(
                                         }
                                         Some(result) => {
                                             if result == errno(32) {
-                                                process.pending_signals |= 1 << 12;
-                                                process.signal_senders[12] = process.group;
+                                                process.signals.enqueue(
+                                                    12,
+                                                    blink_x86_64::SignalInfo {
+                                                        sender: process.group,
+                                                        uid: process.credentials.uid,
+                                                        ..Default::default()
+                                                    },
+                                                );
                                             }
                                             result
                                         }
@@ -1308,8 +1353,14 @@ pub(super) fn run(
                                         }
                                         Some(result) => {
                                             if result == errno(32) {
-                                                process.pending_signals |= 1 << 12;
-                                                process.signal_senders[12] = process.group;
+                                                process.signals.enqueue(
+                                                    12,
+                                                    blink_x86_64::SignalInfo {
+                                                        sender: process.group,
+                                                        uid: process.credentials.uid,
+                                                        ..Default::default()
+                                                    },
+                                                );
                                             }
                                             result
                                         }
@@ -1330,8 +1381,14 @@ pub(super) fn run(
                                         }
                                         Some(result) => {
                                             if result == errno(32) {
-                                                process.pending_signals |= 1 << 12;
-                                                process.signal_senders[12] = process.group;
+                                                process.signals.enqueue(
+                                                    12,
+                                                    blink_x86_64::SignalInfo {
+                                                        sender: process.group,
+                                                        uid: process.credentials.uid,
+                                                        ..Default::default()
+                                                    },
+                                                );
                                             }
                                             result
                                         }
@@ -1652,6 +1709,41 @@ pub(super) fn run(
                             }
                         }
                     }
+                    127 => {
+                        if args[1] > 8 {
+                            errno(22)
+                        } else {
+                            let pending = process.signals.bits & process.signal_mask;
+                            if process
+                                .memory
+                                .borrow_mut()
+                                .write(args[0], &pending.to_le_bytes()[..args[1] as usize])
+                                .is_ok()
+                            {
+                                0
+                            } else {
+                                errno(14)
+                            }
+                        }
+                    }
+                    34 | 130 => {
+                        if nr == 130 && process.suspend_mask.is_none() {
+                            if args[1] != 8 {
+                                process.cpu.cpu().set_result(errno(22));
+                                continue;
+                            }
+                            let mask = process.memory.borrow().load(args[0], 8);
+                            let Ok(mask) = mask else {
+                                process.cpu.cpu().set_result(errno(14));
+                                continue;
+                            };
+                            process.suspend_mask = Some(process.signal_mask);
+                            process.signal_mask = mask & !UNBLOCKABLE;
+                        }
+                        process.pending = Some((number, args));
+                        event = Event::Blocked;
+                        break;
+                    }
                     131 => signals::sigaltstack(&mut process, args)?,
                     13 => {
                         let signal = args[0];
@@ -1686,7 +1778,9 @@ pub(super) fn run(
                                 None => errno(14),
                                 Some(new) => {
                                     if new.flags
-                                        & !(4
+                                        & !(1
+                                            | 2
+                                            | 4
                                             | 0x4000000
                                             | 0x8000000
                                             | 0x10000000
@@ -2179,8 +2273,8 @@ pub(super) fn run(
                             child.tid = child_pid;
                             child.clear_tid = 0;
                             child.robust_head = 0;
-                            child.pending_signals = 0;
-                            child.signal_senders = [0; 64];
+                            child.signals = signals::Pending::default();
+                            child.suspend_mask = None;
                             child.futex = None;
                             child.futex_syscall = None;
                             child.pending = None;
@@ -2536,8 +2630,14 @@ pub(super) fn run(
                                             }
                                             Some(result) => {
                                                 if result == errno(32) {
-                                                    process.pending_signals |= 1 << 12;
-                                                    process.signal_senders[12] = process.group;
+                                                    process.signals.enqueue(
+                                                        12,
+                                                        blink_x86_64::SignalInfo {
+                                                            sender: process.group,
+                                                            uid: process.credentials.uid,
+                                                            ..Default::default()
+                                                        },
+                                                    );
                                                 }
                                                 result
                                             }
@@ -2560,8 +2660,14 @@ pub(super) fn run(
                                             }
                                             Some(result) => {
                                                 if result == errno(32) {
-                                                    process.pending_signals |= 1 << 12;
-                                                    process.signal_senders[12] = process.group;
+                                                    process.signals.enqueue(
+                                                        12,
+                                                        blink_x86_64::SignalInfo {
+                                                            sender: process.group,
+                                                            uid: process.credentials.uid,
+                                                            ..Default::default()
+                                                        },
+                                                    );
                                                 }
                                                 result
                                             }
@@ -2618,8 +2724,14 @@ pub(super) fn run(
                                     (1, Fd::Writer(pipe)) => {
                                         let mut pipe = pipe.borrow_mut();
                                         if pipe.readers == 0 {
-                                            process.pending_signals |= 1 << 12;
-                                            process.signal_senders[12] = process.group;
+                                            process.signals.enqueue(
+                                                12,
+                                                blink_x86_64::SignalInfo {
+                                                    sender: process.group,
+                                                    uid: process.credentials.uid,
+                                                    ..Default::default()
+                                                },
+                                            );
                                             process.cpu.cpu().set_result(errno(32));
                                             continue;
                                         }
@@ -2688,8 +2800,14 @@ pub(super) fn run(
                                         .values()
                                         .any(|p| p.group == target && p.signal_mask & bit == 0))
                             {
-                                process.pending_signals |= bit;
-                                process.signal_senders[(signal - 1) as usize] = process.group;
+                                process.signals.enqueue(
+                                    (signal - 1) as usize,
+                                    blink_x86_64::SignalInfo {
+                                        sender: process.group,
+                                        uid: process.credentials.uid,
+                                        ..Default::default()
+                                    },
+                                );
                             } else {
                                 let chosen = processes
                                     .iter()
@@ -2698,8 +2816,14 @@ pub(super) fn run(
                                     .map(|(id, _)| *id);
                                 if let Some(id) = chosen {
                                     let p = processes.get_mut(&id).unwrap();
-                                    p.pending_signals |= bit;
-                                    p.signal_senders[(signal - 1) as usize] = process.group;
+                                    p.signals.enqueue(
+                                        (signal - 1) as usize,
+                                        blink_x86_64::SignalInfo {
+                                            sender: process.group,
+                                            uid: process.credentials.uid,
+                                            ..Default::default()
+                                        },
+                                    );
                                 }
                             }
                             0
@@ -2734,13 +2858,16 @@ pub(super) fn run(
                         Termination::Exited(code)
                     };
                 }
-                zombies.insert(
-                    process.group,
-                    Zombie {
-                        parent: process.parent,
-                        status: if signaled { code } else { code << 8 },
-                    },
-                );
+                let reap = signals::child_exited(&process, &mut processes, code, signaled);
+                if !reap {
+                    zombies.insert(
+                        process.group,
+                        Zombie {
+                            parent: process.parent,
+                            status: if signaled { code } else { code << 8 },
+                        },
+                    );
+                }
                 for p in processes.values_mut() {
                     if p.parent == process.group {
                         p.parent = 1;
@@ -2883,12 +3010,12 @@ fn open_file(
 
 fn deliver_signal(process: &mut Process) -> Result<Option<i32>> {
     loop {
-        let pending = process.pending_signals & !process.signal_mask;
+        let pending = process.signals.bits & !process.signal_mask;
         if pending == 0 {
             return Ok(None);
         }
         let n = pending.trailing_zeros() as usize;
-        process.pending_signals &= !(1u64 << n);
+        process.signals.bits &= !(1u64 << n);
         let signal = n + 1;
         let action = process.actions.borrow()[n];
         if action.handler == 1 || (action.handler == 0 && matches!(signal, 17 | 18 | 23 | 28)) {
@@ -2909,6 +3036,7 @@ fn deliver_signal(process: &mut Process) -> Result<Option<i32>> {
             .or(process.futex_syscall.take());
         process.poll_deadline = None;
         process.futex = None;
+        let saved_mask = process.suspend_mask.take().unwrap_or(process.signal_mask);
         match &mut process.cpu {
             Engine::X86(cpu) => {
                 if let Some(number) = blocked {
@@ -2928,8 +3056,8 @@ fn deliver_signal(process: &mut Process) -> Result<Option<i32>> {
                             signal: signal as u32,
                             handler: action.handler,
                             restorer: action.restorer,
-                            mask: process.signal_mask,
-                            sender: process.signal_senders[n],
+                            mask: saved_mask,
+                            info: process.signals.info[n],
                             stack: process.signal_stack,
                             use_stack: action.flags & 0x8000000 != 0,
                         },

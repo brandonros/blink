@@ -115,7 +115,7 @@ replace the 26 agent-platform checkpoint receipts.
 Broad ISA/SIMD/FPU coverage, shared file mappings, remaining directory-relative
 *at operations, broader VFS/procfs, UDP/DNS, and JIT remain. ARM64 signal frames,
 threaded exec, queued realtime signals, job control,
-automatic SIGCHLD notifications, and handlers for synchronous faults remain.
+handlers for synchronous faults remain.
 No image-build checkpoint or verifier has passed with Rust.
 
 Memory limits count unique mapped guest pages across threads and forked processes;
@@ -171,8 +171,9 @@ experimental runtime, including PR #218 changes. Builder checkout:
 The preexisting C executable, config, clean-build log and hash manifest are in
 `/workspace/work/blink-baseline`. The clean reference build uses the separate
 `o/rust-reference` directory. On this Linux x86_64 host, Rust, C interpreter and
-native Linux agree on the original fixtures, filesystem/sendfile, and signal
-restart. All 15 fixtures pass Rust/native. C differs on vfork memory sharing and
+native Linux comparisons retain per-fixture results. The expanded filesystem,
+MXCSR restart, socketpair and alternate-stack cases expose additional C baseline
+differences; consult the report rather than treating the C runtime as the oracle. All 16 fixtures pass Rust/native. C differs on vfork memory sharing and
 returns extra F_GETFL flags on a CLOEXEC pipe in the descriptor fixture. C JIT fails the pipe/fork
 fixture and crashes during the exec fixture, including after a clean rebuild.
 Those failures remain visible; C is a comparison target, not an infallible oracle.
@@ -258,7 +259,7 @@ children, and remain through exec. Threads share their process timer; pending
 standard signals coalesce. Wall/monotonic clock queries use host clock adapters.
 Nanosleep and absolute/relative clock_nanosleep cooperate with scheduling and
 write remaining time on interruption. Virtual/profiling CPU timers and other
-clock IDs remain unsupported. The native comparison suite now has 15 compiled
+clock IDs remain unsupported. The native comparison suite now has 16 compiled
 fixtures, including real-timer delivery, fork inheritance, and interrupted sleep.
 
 Packed conversion memory operands are checked at their architectural width: CVTDQ2PD and CVTPS2PD read eight bytes, even though the decoder reports a 16-byte vector width. Page-boundary and unmasked-exception tests guard source accesses and whole-destination preservation.
@@ -270,3 +271,12 @@ The native comparison checks stack placement, mutation rejection while active,
 autodisarm/restoration and fork/exec inheritance. No host signal stack changes.
 The current Alpine workload and 435,200-record floating-point gates passed on
 both Linux AMD64 and Darwin arm64 at commit 8cde89c.
+
+Guest SIGCHLD now reports child PID, UID, CLD_EXITED/CLD_KILLED and exit status.
+Explicit SIG_IGN and SA_NOCLDWAIT reap children automatically; the default
+SIGCHLD disposition still leaves a waitable zombie. Standard pending signals
+retain the first event's metadata while coalescing. rt_sigpending, pause and
+rt_sigsuspend are supported; sigsuspend restores the original mask on handler
+return and returns EINTR even with SA_RESTART. The native fixture checks these
+behaviors together with child-exit notifications. Child resource-usage accounting,
+stop/continue notifications, and queued realtime delivery remain unsupported.
