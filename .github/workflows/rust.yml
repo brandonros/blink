@@ -37,6 +37,9 @@ jobs:
           python3 rust/fcmov-regressions.py
           python3 rust/packed-regressions.py
           python3 rust/approx-regressions.py
+          python3 -m venv target/precision-python
+          target/precision-python/bin/pip install mpmath==1.3.0
+          target/precision-python/bin/python rust/atan-regressions.py
           python3 rust/tcp-smoke.py
       - uses: actions/checkout@v4
         with:
@@ -94,6 +97,9 @@ jobs:
             target/approx-regressions/approx-x86_64
             target/approx-regressions/native.bin
             target/approx-regressions/results.json
+            target/atan-regressions/atan-x86_64
+            target/atan-regressions/native.bin
+            target/atan-regressions/results.json
 
   replay-amd64-on-apple-silicon:
     needs: runtime
@@ -115,3 +121,6 @@ jobs:
           python3 rust/approx-regressions.py --replay target/oracle/approx-regressions
           cargo run --release --locked -p blink-cli -- target/oracle/differential/atomic-x86_64
           cargo run --release --locked -p blink-cli -- target/oracle/differential/fpenv-x86_64
+          python3 -m venv target/precision-python
+          target/precision-python/bin/pip install mpmath==1.3.0
+          target/precision-python/bin/python rust/atan-regressions.py --replay target/oracle/atan-regressions

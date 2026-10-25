@@ -140,6 +140,82 @@ fn square_root(bits: u128, control: u16) -> (u128, u16, bool) {
     }
     (rounded | ((output_exp as u128) << 64), exceptions, up)
 }
+// Arithmetic-only format: 126 significand bits and a wide exponent. Never
+// serialize it with to_bits/from_bits (the public bit container is only u128).
+struct Transcendental;
+impl Semantics for Transcendental {
+    const BITS: usize = 143;
+    const EXP_BITS: usize = 17;
+}
+type Math = IeeeFloat<Transcendental>;
+fn pi() -> Math {
+    Math::from_u128(0xc90f_daa2_2168_c234_c4c6_628b_80dc_1cd1)
+        .value
+        .scalbn(-126)
+}
+
+fn atan_series(mut z: Math) -> Math {
+    let one = Math::from_u128(1).value;
+    let reduced = z > one.scalbn(-1);
+    if reduced {
+        z = (z - one)
+            .value
+            .div_r((z + one).value, Round::NearestTiesToEven)
+            .value;
+    }
+    let square = -(z * z).value;
+    let mut power = z;
+    let mut sum = z;
+    for n in 1..256 {
+        power = (power * square).value;
+        let term = (power / Math::from_u128(2 * n + 1).value).value;
+        let next = (sum + term).value;
+        if next == sum {
+            break;
+        }
+        sum = next;
+    }
+    if reduced {
+        (pi().scalbn(-2) + sum).value
+    } else {
+        sum
+    }
+}
+fn atan2(y: Extended, x: Extended, round: Round) -> (u128, u16, bool) {
+    let wy: Math = y.abs().convert(&mut false).value;
+    let wx: Math = x.abs().convert(&mut false).value;
+    let mut angle = if y.is_zero() || (x.is_infinite() && !y.is_infinite()) {
+        Math::ZERO
+    } else if x.is_zero() || (y.is_infinite() && !x.is_infinite()) {
+        pi().scalbn(-1)
+    } else if x.is_infinite() && y.is_infinite() {
+        pi().scalbn(-2)
+    } else if wy > wx {
+        (pi().scalbn(-1) - atan_series((wx / wy).value)).value
+    } else {
+        atan_series((wy / wx).value)
+    };
+    if x.is_negative() {
+        angle = (pi() - angle).value;
+    }
+    if y.is_negative() {
+        angle = -angle;
+    }
+    let result: rustc_apfloat::StatusAnd<Extended> = angle.convert_r(round, &mut false);
+    let widened: Math = result.value.convert(&mut false).value;
+    let mut exceptions = flags(result.status);
+    if !angle.is_zero() {
+        exceptions |= 32;
+    }
+    if exceptions & 32 != 0 && angle.abs() < Math::from_u128(1).value.scalbn(-16382) {
+        exceptions |= 16;
+    }
+    (
+        result.value.to_bits(),
+        exceptions,
+        widened.abs() > angle.abs(),
+    )
+}
 const INDEFINITE: u128 = 0xffff_c000_0000_0000_0000;
 fn unsupported_extended(bits: u128) -> bool {
     ((bits >> 64) & 0x7fff) != 0 && bits & (1 << 63) == 0
@@ -411,6 +487,7 @@ impl X86 {
                 | Op::FSQRT
                 | Op::FSCALE
                 | Op::FPREM
+                | Op::FPATAN
                 | Op::FPREM1
                 | Op::FXTRACT
         ) {
@@ -809,6 +886,59 @@ impl X86 {
                     self.fpu.set(0, exponent);
                     self.fpu.top = next;
                     self.fpu.set(0, significand);
+                }
+            }
+            Op::FPATAN => {
+                let mut exceptions = 0;
+                let xb = self.fpu.get(0, &mut exceptions);
+                let yb = self.fpu.get(1, &mut exceptions);
+                let x = arithmetic_input(xb, &mut exceptions);
+                let y = arithmetic_input(yb, &mut exceptions);
+                let (bits, raised, up) = if unsupported_extended(xb)
+                    || unsupported_extended(yb)
+                    || exceptions & 0x40 != 0
+                {
+                    (INDEFINITE, 1, false)
+                } else if x.is_nan() || y.is_nan() {
+                    let chosen = if !x.is_nan() {
+                        yb
+                    } else if !y.is_nan() {
+                        xb
+                    } else if x.is_signaling() != y.is_signaling() {
+                        if x.is_signaling() {
+                            yb
+                        } else {
+                            xb
+                        }
+                    } else if xb as u64 != yb as u64 {
+                        if xb as u64 > yb as u64 {
+                            xb
+                        } else {
+                            yb
+                        }
+                    } else {
+                        xb.min(yb)
+                    };
+                    exceptions &= !2;
+                    (
+                        chosen | (1 << 62),
+                        u16::from(x.is_signaling() || y.is_signaling()),
+                        false,
+                    )
+                } else {
+                    atan2(y, x, self.fpu.round())
+                };
+                exceptions |= raised;
+                if exceptions & 1 != 0 {
+                    exceptions &= !2;
+                }
+                self.fpu.status &= !0x200;
+                if up {
+                    self.fpu.status |= 0x200;
+                }
+                if self.fpu.exception(exceptions) {
+                    self.fpu.set(1, bits);
+                    self.fpu.pop();
                 }
             }
             Op::FPREM | Op::FPREM1 => {
@@ -1476,6 +1606,19 @@ mod tests {
             assert_eq!(cpu.fpu.get(0, &mut 0), x.to_bits());
             assert_eq!(cpu.fpu.status() & 0x8081, 0x8081);
         }
+    }
+    #[test]
+    fn atan_unmasked_invalid_does_not_pop_or_replace_destination() {
+        let (mut cpu, mut memory) = machine(&[0xd9, 0xf3]);
+        cpu.fpu.set(0, Extended::from_u128(1).value.to_bits());
+        cpu.fpu.set(1, 1u128 | (1 << 64)); // unsupported unnormal encoding
+        cpu.fpu.control &= !1;
+        let before = cpu.fpu.clone();
+        cpu.step(&mut memory).unwrap();
+        assert_eq!(cpu.fpu.values, before.values);
+        assert_eq!(cpu.fpu.tags, before.tags);
+        assert_eq!(cpu.fpu.top, before.top);
+        assert_eq!(cpu.fpu.status() & 0x8081, 0x8081);
     }
     #[test]
     fn extract_unmasked_stack_overflow_preserves_both_destinations() {
