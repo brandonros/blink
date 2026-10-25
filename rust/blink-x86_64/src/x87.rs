@@ -77,6 +77,69 @@ where
         widened.abs() > value.abs(),
     )
 }
+// Scale the 64-bit significand to a 128-bit integer radicand. The exact
+// remainder supports all precision controls without an intermediate FP round.
+fn square_root(bits: u128, control: u16) -> (u128, u16, bool) {
+    let value = Extended::from_bits(bits);
+    let mut significand = bits as u64 as u128;
+    let raw_exp = ((bits >> 64) & 0x7fff) as i32;
+    if raw_exp != 0 && significand & (1 << 63) == 0 {
+        return (INDEFINITE, 1, false);
+    }
+    if value.is_nan() {
+        return (bits | (1 << 62), u16::from(value.is_signaling()), false);
+    }
+    if value.is_zero() {
+        return (bits, 0, false);
+    }
+    if value.is_negative() {
+        return (INDEFINITE, 1, false);
+    }
+    if value.is_infinite() {
+        return (bits, 0, false);
+    }
+    let mut exceptions = if raw_exp == 0 { 2 } else { 0 };
+    let mut exponent = raw_exp.max(1) - 16383;
+    while significand & (1 << 63) == 0 {
+        significand <<= 1;
+        exponent -= 1;
+    }
+    if exponent & 1 != 0 {
+        significand <<= 1;
+        exponent -= 1;
+    }
+    let (root, remainder) = super::float::integer_sqrt(significand << 63);
+    let precision = match (control >> 8) & 3 {
+        0 => 24,
+        2 => 53,
+        _ => 64,
+    };
+    let shift = 64 - precision;
+    let tail = root & ((1u128 << shift) - 1);
+    let mut rounded = root >> shift;
+    let inexact = tail != 0 || remainder != 0;
+    let up = inexact
+        && match (control >> 10) & 3 {
+            0 if shift == 0 => remainder > root,
+            0 => {
+                let halfway = 1u128 << (shift - 1);
+                tail > halfway || (tail == halfway && (remainder != 0 || rounded & 1 != 0))
+            }
+            2 => true,
+            _ => false,
+        };
+    rounded += u128::from(up);
+    rounded <<= shift;
+    let mut output_exp = exponent / 2 + 16383;
+    if rounded & (1 << 64) != 0 {
+        rounded >>= 1;
+        output_exp += 1;
+    }
+    if inexact {
+        exceptions |= 32;
+    }
+    (rounded | ((output_exp as u128) << 64), exceptions, up)
+}
 const INDEFINITE: u128 = 0xffff_c000_0000_0000_0000;
 #[derive(Clone)]
 pub(crate) struct Fpu {
@@ -303,6 +366,7 @@ impl X86 {
                 | Op::FUCOMIP
                 | Op::FTST
                 | Op::FRNDINT
+                | Op::FSQRT
         ) {
             return Ok(false);
         }
@@ -475,6 +539,19 @@ impl X86 {
                     if matches!(op, Op::FCOMPP | Op::FUCOMPP) {
                         self.fpu.pop();
                     }
+                }
+            }
+            Op::FSQRT => {
+                let mut exceptions = 0;
+                let bits = self.fpu.get(0, &mut exceptions);
+                let (result, status, rounded_up) = square_root(bits, self.fpu.control);
+                exceptions |= status;
+                self.fpu.status &= !0x200;
+                if rounded_up {
+                    self.fpu.status |= 0x200;
+                }
+                if self.fpu.exception(exceptions) {
+                    self.fpu.set(0, result);
                 }
             }
             Op::FRNDINT => {
@@ -792,6 +869,25 @@ mod tests {
             .unwrap();
         memory.initialize(0x1000, code).unwrap();
         (X86::new(0x1000, 0x3000), memory)
+    }
+    #[test]
+    fn square_root_empty_stack_and_unmasked_invalid_preserve_state() {
+        let (mut cpu, mut memory) = machine(&[0xd9, 0xfa]);
+        cpu.step(&mut memory).unwrap();
+        assert_eq!(cpu.fpu.get(0, &mut 0), INDEFINITE);
+        assert_eq!(cpu.fpu.status() & 0x241, 0x41);
+        cpu.rip = 0x1000;
+        let negative = Extended::from_i128(-1).value.to_bits();
+        cpu.fpu = Fpu::default();
+        cpu.fpu.set(0, negative);
+        cpu.fpu.control &= !1;
+        cpu.step(&mut memory).unwrap();
+        assert_eq!(cpu.fpu.get(0, &mut 0), negative);
+        assert_eq!(cpu.fpu.status() & 0x8081, 0x8081);
+        assert!(matches!(
+            cpu.x87(&mut memory, Op::WAIT, None, None, 0x1000),
+            Err(Error::ArithmeticFault)
+        ));
     }
     #[test]
     fn extended_load_at_page_end_and_stack_overflow() {

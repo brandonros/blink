@@ -48,7 +48,7 @@ fn exceptions(status: Status) -> u32 {
 // Restoring integer square root, with the exact remainder. Binary32/binary64
 // significands need at most 106 bits after scaling, so no host float or wider
 // integer dependency is needed.
-fn integer_sqrt(mut value: u128) -> (u128, u128) {
+pub(super) fn integer_sqrt(mut value: u128) -> (u128, u128) {
     let mut root = 0;
     let mut bit = 1u128 << 126;
     while bit > value {

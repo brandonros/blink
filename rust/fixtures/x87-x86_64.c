@@ -13,7 +13,7 @@ struct record {unsigned long a,b;unsigned char result[10];unsigned short status,
 #define STORE80(instruction) __asm__ volatile("fninit; fldcw %4; fldt %2; fldt %3; " instruction " %0; fnstsw %1; fninit" :"=m"(r.result),"=m"(r.status):"m"(left),"m"(right),"m"(r.control):"st","st(1)","memory")
 #define COMPARE80(instruction) do { __asm__ volatile("fninit; fldcw %4; fldt %2; fldt %3; " instruction "; pushfq; popq %0; fnstsw %1; fninit" :"=m"(r.result),"=m"(r.status):"m"(left),"m"(right),"m"(r.control):"st","st(1)","memory","cc"); r.result[0]&=0xd5;r.result[1]&=8;for(int n=2;n<10;n++)r.result[n]=0; } while(0)
 __attribute__((noreturn)) void _start(void) {
-    for(unsigned op=0;op<19;op++) for(unsigned mode=0;mode<12;mode++) for(unsigned pair=0;pair<169+256;pair++) {
+    for(unsigned op=0;op<20;op++) for(unsigned mode=0;mode<12;mode++) for(unsigned pair=0;pair<169+256;pair++) {
         struct record r={0};r.op=op;r.control=0x7f|((mode<4?0:mode<8?2:3)<<8)|((mode&3)<<10);
         if(pair<169) {r.a=values[pair/13];r.b=values[pair%13];}
         else {
@@ -35,6 +35,7 @@ __attribute__((noreturn)) void _start(void) {
         case 15:STORE80("fistpq");break;
         case 16:STORE80("fistpl");break;
         case 17:STORE80("fistps");break;
+        case 19:OPERATE80("fsqrt");break;
         case 18:STORE80("fisttpq");break;
         case 4:OPERATE80("faddp");break;case 5:OPERATE80("fsubp");break;case 6:OPERATE80("fmulp");break;case 7:OPERATE80("fdivp");break;case 0:OPERATE("faddp");break;case 1:OPERATE("fsubp");break;case 2:OPERATE("fmulp");break;case 3:OPERATE("fdivp");break;}
         if(call(1,1,(long)&r,sizeof r)!=sizeof r) {call(231,1,0,0);__builtin_unreachable();}
@@ -43,9 +44,24 @@ __attribute__((noreturn)) void _start(void) {
     for(unsigned mode=0;mode<12;mode++) for(unsigned precision=0;precision<2;precision++) for(unsigned op=0;op<2;op++) {
         struct extended left={0x8000000000000000ul | (1ul<<(precision?10:39)),0x3fff};
         struct extended right={0x8000000000000000ul,0x3fff-1000};
-        struct record r={0};r.a=left.fraction;r.b=right.exponent;r.op=19+op;
+        struct record r={0};r.a=left.fraction;r.b=right.exponent;r.op=20+op;
         r.control=0x7f|((mode<4?0:mode<8?2:3)<<8)|((mode&3)<<10);
         if(op==0) {OPERATE80("faddp");} else {OPERATE80("fsubp");}
+        if(call(1,1,(long)&r,sizeof r)!=sizeof r) {call(231,1,0,0);__builtin_unreachable();}
+    }
+    /* Square-root encodings, extreme exponents and full-width random inputs. */
+    static const struct extended special[]={
+        {1,1},{0,0x7fff},{0x8000000000000000ul,0},
+        {0xfffffffffffffffful,0},{1,0},{0x7ffffffffffffffful,0},
+        {0x8000000000000001ul,0x3fff},{0xfffffffffffffffful,0x7ffe}
+    };
+    for(unsigned mode=0;mode<12;mode++) for(unsigned sample=0;sample<4104;sample++) {
+        struct extended left={0,0},right;
+        if(sample<8)right=special[sample];
+        else {unsigned long seed=sample*0x9e3779b97f4a7c15ul;seed^=seed>>12;seed^=seed<<25;seed^=seed>>27;right.fraction=seed|0x8000000000000000ul;right.exponent=(seed>>32)&0x7fff;}
+        struct record r={0};r.a=right.fraction;r.b=right.exponent;r.op=22;
+        r.control=0x7f|((mode<4?0:mode<8?2:3)<<8)|((mode&3)<<10);
+        OPERATE80("fsqrt");
         if(call(1,1,(long)&r,sizeof r)!=sizeof r) {call(231,1,0,0);__builtin_unreachable();}
     }
     call(231,0,0,0);__builtin_unreachable();

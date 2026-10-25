@@ -104,7 +104,7 @@ UID/GID 123:456, mode 0640, and mtime 1 survive into a subsequent guest invocati
 without changing host ownership. The unsigned fixture explicitly uses
 `--allow-untrusted --force-non-repository` in a disposable root without persistent
 APK cache. No repository package download or signature-trust gate is claimed.
-Node, Bun, and builder images are unproven.
+Pinned Alpine Node gates are described below. Bun and complete builder images remain unproven.
 
 The six small builder examples `00-hello` through `05-environment` pass every
 RUN and CMD via `builder-smoke.py`, including gzip/tar round trip and SHA-256.
@@ -290,14 +290,14 @@ loads/stores, and stack operations. Signal handlers start with a fresh x87 state
 sigreturn restores the saved stack and control word. An unmasked exception
 preserves the destination/stack and faults on the next waiting instruction.
 
-`python3 rust/x87-regressions.py` compares 96,948 native AMD64 result/status records,
+`python3 rust/x87-regressions.py` compares 151,296 native AMD64 result/status records,
 including 80-bit extrema, NaNs, denormals, all three precision controls, four rounding modes, comparisons and
 conversions. Tests also cover a ten-byte source at a page boundary, masked stack
 overflow, deferred faults, and signal-frame preservation. The adapter handles
 x87 NaN priority and the APFloat directed-overflow flag difference. CI replays
 this native-generated fixture on Apple Silicon as well as the SSE fixture.
 
-This is partial x87 support. Transcendentals, square root,
+This is partial x87 support. Transcendentals,
 legacy environment/save-state instructions and complete
 unsupported-encoding behavior remain; unsupported operations fail explicitly.
 The complete x87 FPU feature remains unadvertised. No Node/Bun workload or
@@ -478,3 +478,9 @@ Double-width CMPXCHG8B/16B is implemented as one cooperative interpreter step,
 with write-access checks on success and failure, architectural register widths,
 ZF-only updates and CX16 alignment checks. CPUID advertises CX8/CX16 after
 native comparisons and fault-state tests; CI replays the fixture on Darwin arm64.
+
+FSQRT uses a 128-bit integer radicand and exact remainder, rounding directly
+to the selected 24/53/64-bit significand. The x87 oracle now compares 151,296
+records, including 49,248 extra square-root cases with extended-format edge
+encodings, exponent extremes, random significands and all rounding/precision
+controls. Empty-stack and deferred unmasked-invalid behavior have focused tests.
