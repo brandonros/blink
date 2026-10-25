@@ -330,17 +330,15 @@ impl Memory {
             .checked_add(len as u64 - 1)
             .ok_or(Error::MemoryFault { address, access })?;
         for p in address / PAGE..=end / PAGE {
-            if !self
+            let page = self
                 .pages
                 .get(&p)
-                .is_some_and(|p| p.permissions.allows(access))
-            {
-                return Err(Error::MemoryFault {
+                .filter(|page| page.permissions.allows(access))
+                .ok_or(Error::MemoryFault {
                     address: address.max(p * PAGE),
                     access,
-                });
-            }
-            if self.pages[&p].bus_fault {
+                })?;
+            if page.bus_fault {
                 return Err(Error::BusFault {
                     address: address.max(p * PAGE),
                 });
@@ -350,9 +348,14 @@ impl Memory {
     }
     pub fn read(&self, address: u64, dst: &mut [u8], access: Access) -> Result<()> {
         self.check(address, dst.len(), access)?;
-        for (i, b) in dst.iter_mut().enumerate() {
-            let a = address + i as u64;
-            *b = self.pages[&(a / PAGE)].bytes[(a % PAGE) as usize];
+        let mut copied = 0;
+        while copied < dst.len() {
+            let at = address + copied as u64;
+            let offset = (at % PAGE) as usize;
+            let count = (4096 - offset).min(dst.len() - copied);
+            dst[copied..copied + count]
+                .copy_from_slice(&self.pages[&(at / PAGE)].bytes[offset..offset + count]);
+            copied += count;
         }
         Ok(())
     }
@@ -373,16 +376,35 @@ impl Memory {
                 });
             }
         }
-        for (i, b) in src.iter().enumerate() {
-            let a = address + i as u64;
-            self.pages.get_mut(&(a / PAGE)).unwrap().bytes[(a % PAGE) as usize] = *b;
+        let mut copied = 0;
+        while copied < src.len() {
+            let at = address + copied as u64;
+            let offset = (at % PAGE) as usize;
+            let count = (4096 - offset).min(src.len() - copied);
+            self.pages.get_mut(&(at / PAGE)).unwrap().bytes[offset..offset + count]
+                .copy_from_slice(&src[copied..copied + count]);
+            copied += count;
         }
         Ok(())
     }
+    /// Executable bytes remaining in this page only. Decoders may inspect the
+    /// slice without touching a later page or caching self-modifying guest code.
+    pub fn instruction_page(&self, address: u64) -> Result<&[u8]> {
+        let page = self
+            .pages
+            .get(&(address / PAGE))
+            .filter(|page| page.permissions.execute)
+            .ok_or(Error::MemoryFault {
+                address,
+                access: Access::Execute,
+            })?;
+        if page.bus_fault {
+            return Err(Error::BusFault { address });
+        }
+        Ok(&page.bytes[(address % PAGE) as usize..])
+    }
     pub fn fetch(&self, address: u64) -> Result<u8> {
-        let mut b = [0];
-        self.read(address, &mut b, Access::Execute)?;
-        Ok(b[0])
+        Ok(self.instruction_page(address)?[0])
     }
     pub fn load(&self, address: u64, width: usize) -> Result<u64> {
         let mut b = [0; 8];
@@ -413,6 +435,20 @@ pub trait Cpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bulk_copies_cross_pages_and_preserve_read_output_on_fault() {
+        let mut memory = Memory::new(16384);
+        memory.map(4096, 12288, Permissions::RW).unwrap();
+        let input: Vec<_> = (0..9000).map(|n| (n * 37) as u8).collect();
+        memory.write(4097, &input).unwrap();
+        let mut output = vec![0; input.len()];
+        memory.read(4097, &mut output, Access::Read).unwrap();
+        assert_eq!(input, output);
+        memory.unmap(12288, 4096).unwrap();
+        output.fill(0xa5);
+        assert!(memory.read(4097, &mut output, Access::Read).is_err());
+        assert!(output.iter().all(|byte| *byte == 0xa5));
+    }
     #[test]
     fn cross_page_write_is_atomic() {
         let mut m = Memory::new(8192);

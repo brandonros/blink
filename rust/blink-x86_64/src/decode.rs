@@ -35,7 +35,25 @@ impl Value {
 pub(super) fn instruction(memory: &Memory, pc: u64) -> Result<(Instruction, u64)> {
     let mut bytes = [0; 15];
     let decoder = InstDecoder::default();
-    for n in 0..15 {
+    // Decode once when the instruction stays in this executable page. Only a
+    // genuinely incomplete instruction may fetch from the following page.
+    let available = memory.instruction_page(pc)?;
+    let count = available.len().min(15);
+    bytes[..count].copy_from_slice(&available[..count]);
+    match decoder.decode(&mut U8Reader::new(&bytes[..count])) {
+        Ok(instruction) => {
+            let end = pc.wrapping_add(instruction.len().to_const());
+            return Ok((instruction, end));
+        }
+        Err(DecodeError::ExhaustedInput) => {}
+        Err(_) => {
+            return Err(Error::UnsupportedInstruction {
+                pc,
+                encoding: u32::from_le_bytes(bytes[..4].try_into().unwrap()),
+            })
+        }
+    }
+    for n in count..15 {
         bytes[n] = memory.fetch(pc.wrapping_add(n as u64))?;
         match decoder.decode(&mut U8Reader::new(&bytes[..n + 1])) {
             Ok(i) => {
