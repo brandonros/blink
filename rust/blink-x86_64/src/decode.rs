@@ -8,6 +8,7 @@ use yaxpeax_x86::long_mode::{
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Value {
     Vector(usize),
+    Mmx(usize),
     FloatStack(usize),
     Register {
         index: usize,
@@ -26,6 +27,7 @@ impl Value {
             Self::Register { width, .. } | Self::Memory { width, .. } => width,
             Self::Immediate(_) => 8,
             Self::Vector(_) => 16,
+            Self::Mmx(_) => 8,
             Self::FloatStack(_) => 10,
         }
     }
@@ -52,6 +54,9 @@ pub(super) fn instruction(memory: &Memory, pc: u64) -> Result<(Instruction, u64)
 fn register(reg: RegSpec) -> Option<Value> {
     let class = reg.class();
     let num = reg.num() as usize;
+    if class == register_class::MM && num < 8 {
+        return Some(Value::Mmx(num));
+    }
     if class == register_class::ST && num < 8 {
         return Some(Value::FloatStack(num));
     }
@@ -203,7 +208,12 @@ pub(super) fn operand(
         2
     } else if matches!(
         i.opcode(),
-        yaxpeax_x86::long_mode::Opcode::CVTDQ2PD | yaxpeax_x86::long_mode::Opcode::CVTPS2PD
+        yaxpeax_x86::long_mode::Opcode::CVTDQ2PD
+            | yaxpeax_x86::long_mode::Opcode::CVTPS2PD
+            | yaxpeax_x86::long_mode::Opcode::CVTPS2PI
+            | yaxpeax_x86::long_mode::Opcode::CVTTPS2PI
+            | yaxpeax_x86::long_mode::Opcode::CVTPI2PS
+            | yaxpeax_x86::long_mode::Opcode::CVTPI2PD
     ) {
         // These packed conversions read two 32-bit elements, not m128.
         // yaxpeax 2.2.0 reports the destination vector width for memory operands.

@@ -27,6 +27,14 @@ __attribute__((noreturn,force_align_arg_pointer)) void _start(void) {
     __asm__ volatile("fxrstor %1; fxsave %0":"=m"(second):"m"(first):"st","st(1)","xmm0","xmm15","memory");
     for(int n=0;n<5;n++)CHECK(first[n]==second[n]);
     for(int n=160;n<416;n++)CHECK(first[n]==second[n]);
+    __asm__ volatile("fninit; fld1; movq %1,%%mm0; fxsave64 %0":"=m"(second):"m"(vector[0]):"st","mm0","memory");
+    CHECK(second[4]==255 && (get(second+2,2)&0x3800)==0);
+    CHECK(get(second+32,8)==vector[0] && get(second+40,2)==0xffff);
+    CHECK(get(second+32+7*16,8)==0x8000000000000000ul && get(second+40+7*16,2)==0x3fff);
+    __asm__ volatile("emms; fxsave64 %0":"=m"(second)::"memory");
+    CHECK(second[4]==0 && (get(second+2,2)&0x3800)==0);
+    __asm__ volatile("fld1; fxsave64 %0":"=m"(second)::"st","memory");
+    CHECK(second[4]==0x80 && (get(second+2,2)&0x3800)==0x3800 && get(second+40,2)==0x3fff);
     for(int invalid=0;invalid<2;invalid++) {
         long child=call(57,0,0,0,0);CHECK(child>=0);
         if(child==0) {

@@ -16,13 +16,15 @@ struct record { unsigned long a,b,result; unsigned control,status,operation,widt
 #define FROMINT(instruction) __asm__ volatile(SETUP instruction " %2,%%xmm1; movq %%xmm1,%0; stmxcsr %1" ARGS)
 #define PREDICATE(instruction,predicate) __asm__ volatile(SETUP instruction " $" #predicate ",%%xmm1,%%xmm0; movq %%xmm0,%0; stmxcsr %1" ARGS)
 #define PACKED(instruction) __asm__ volatile("ldmxcsr %3; movdqu %2,%%xmm0; " instruction " %%xmm0,%%xmm1; movdqu %%xmm1,%0; stmxcsr %1" :"=m"(output),"=m"(status):"m"(input),"m"(control):"xmm0","xmm1","memory")
+#define FROMMM(instruction) __asm__ volatile("fninit; ldmxcsr %3; movq %2,%%mm0; movdqu %2,%%xmm1; " instruction " %%mm0,%%xmm1; movdqu %%xmm1,%0; stmxcsr %1; emms" :"=m"(output),"=m"(status):"m"(input),"m"(control):"xmm1","mm0","memory")
+#define TOMM(instruction) do {output[0]=output[1]=0; __asm__ volatile("fninit; ldmxcsr %3; movdqu %2,%%xmm0; " instruction " %%xmm0,%%mm1; movq %%mm1,%0; stmxcsr %1; emms" :"=m"(output[0]),"=m"(status):"m"(input),"m"(control):"xmm0","mm1","memory");} while(0)
 static void packed(void) {
-    for(unsigned op=0;op<8;op++) for(unsigned mode=0;mode<16;mode++)
+    for(unsigned op=0;op<14;op++) for(unsigned mode=0;mode<16;mode++)
     for(unsigned pair=0;pair<169+256;pair++) {
         unsigned long input[2],output[2]; unsigned status;
         unsigned control=0x1f80|((mode&3)<<13)|((mode&4)?64:0)|((mode&8)?32768:0);
         if(pair<169) {
-            if(op==1||op==2||op==6) {
+            if(op==1||op==2||op==6||op==10||op==11) {
                 input[0]=singles[pair/13]|(singles[pair%13]<<32);
                 input[1]=singles[(pair+3)%13]|(singles[(pair+7)%13]<<32);
             } else {input[0]=doubles[pair/13];input[1]=doubles[pair%13];}
@@ -40,6 +42,9 @@ static void packed(void) {
         case 5:PACKED("cvttpd2dq");break;
         case 6:PACKED("cvtps2pd");break;
         case 7:PACKED("cvtpd2ps");break;
+        case 8:FROMMM("cvtpi2ps");break;case 9:FROMMM("cvtpi2pd");break;
+        case 10:TOMM("cvtps2pi");break;case 11:TOMM("cvttps2pi");break;
+        case 12:TOMM("cvtpd2pi");break;case 13:TOMM("cvttpd2pi");break;
         }
         for(unsigned half=0;half<2;half++) {
             struct record r={input[0],input[1],output[half],control,status,24+op,16+half};

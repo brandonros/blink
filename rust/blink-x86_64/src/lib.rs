@@ -47,7 +47,7 @@ impl X86 {
     fn read(&self, m: &Memory, v: Value) -> Result<u64> {
         Ok(match v {
             Value::Immediate(v) => v,
-            Value::Vector(_) | Value::FloatStack(_) => {
+            Value::Vector(_) | Value::Mmx(_) | Value::FloatStack(_) => {
                 return Err(Error::UnsupportedInstruction {
                     pc: self.rip,
                     encoding: 0,
@@ -87,6 +87,7 @@ impl X86 {
         let mut bytes = [0; 16];
         match value {
             Value::Vector(i) => bytes = self.xmm[i],
+            Value::Mmx(i) => bytes[..8].copy_from_slice(&(self.fpu.values[i] as u64).to_le_bytes()),
             Value::Memory { address, width } => {
                 m.read(address, &mut bytes[..width], blink_core::Access::Read)?
             }
@@ -100,6 +101,11 @@ impl X86 {
     }
     fn write_vector(&mut self, m: &mut Memory, dst: Value, bytes: [u8; 16]) -> Result<()> {
         match dst {
+            Value::Mmx(i) => {
+                self.fpu.values[i] =
+                    (0xffffu128 << 64) | u64::from_le_bytes(bytes[..8].try_into().unwrap()) as u128;
+                Ok(())
+            }
             Value::Vector(i) => {
                 self.xmm[i] = bytes;
                 Ok(())
@@ -232,6 +238,18 @@ impl Cpu for X86 {
         } else {
             None
         };
+        let mmx = [a, b, c]
+            .into_iter()
+            .flatten()
+            .any(|v| matches!(v, Value::Mmx(_)));
+        if (mmx || op == Op::EMMS) && self.fpu.status & !self.fpu.control & 63 != 0 {
+            return Err(Error::ArithmeticFault);
+        }
+        if op == Op::EMMS {
+            self.fpu.occupied = [false; 8];
+            self.rip = next;
+            return Ok(Step::Continue);
+        }
         // Legacy 128-bit SSE memory operands require 16-byte alignment except
         // the explicitly unaligned moves. Scalar and 64-bit operands do not.
         if [a, b, c]
@@ -268,6 +286,10 @@ impl Cpu for X86 {
             || self.float(m, op, a, b, c, pc)?
             || self.packed(m, op, a, b, c, pc)?
         {
+            if mmx {
+                self.fpu.occupied = [true; 8];
+                self.fpu.top = 0;
+            }
             return Ok(Step::Continue);
         }
         match op {
@@ -289,6 +311,9 @@ impl Cpu for X86 {
             }
             Op::MOVD
             | Op::MOVQ
+            | Op::MOVQ2DQ
+            | Op::MOVDQ2Q
+            | Op::MOVNTQ
             | Op::MOVDQA
             | Op::MOVDQU
             | Op::MOVAPS
@@ -317,7 +342,7 @@ impl Cpu for X86 {
                 let mut bytes = self.vector(m, src)?;
                 let width = match op {
                     Op::MOVD | Op::MOVSS => 4,
-                    Op::MOVQ | Op::MOVSD => 8,
+                    Op::MOVQ | Op::MOVSD | Op::MOVQ2DQ | Op::MOVDQ2Q | Op::MOVNTQ => 8,
                     _ => 16,
                 };
                 if width < 16 {
@@ -475,12 +500,12 @@ impl Cpu for X86 {
                     op,
                     Op::PUNPCKHBW | Op::PUNPCKHWD | Op::PUNPCKHDQ | Op::PUNPCKHQDQ
                 ) {
-                    8
+                    dst.width() / 2
                 } else {
                     0
                 };
                 let mut out = [0; 16];
-                for n in 0..8 / lane {
+                for n in 0..dst.width() / 2 / lane {
                     out[n * lane * 2..n * lane * 2 + lane]
                         .copy_from_slice(&left[start + n * lane..start + n * lane + lane]);
                     out[n * lane * 2 + lane..n * lane * 2 + lane * 2]
@@ -488,13 +513,15 @@ impl Cpu for X86 {
                 }
                 self.write_vector(m, dst, out)?;
             }
-            Op::PSHUFD => {
+            Op::PSHUFD | Op::PSHUFW => {
                 let src = self.vector(m, b.ok_or_else(bad)?)?;
                 let imm = self.read(m, c.ok_or_else(bad)?)?;
                 let mut out = [0; 16];
+                let width = if op == Op::PSHUFD { 4 } else { 2 };
                 for n in 0..4 {
                     let index = ((imm >> (n * 2)) & 3) as usize;
-                    out[n * 4..n * 4 + 4].copy_from_slice(&src[index * 4..index * 4 + 4]);
+                    out[n * width..n * width + width]
+                        .copy_from_slice(&src[index * width..index * width + width]);
                 }
                 self.write_vector(m, a.ok_or_else(bad)?, out)?;
             }
@@ -1112,6 +1139,10 @@ impl Cpu for X86 {
             }
             _ => return Err(bad()),
         }
+        if mmx {
+            self.fpu.occupied = [true; 8];
+            self.fpu.top = 0;
+        }
         Ok(Step::Continue)
     }
 }
@@ -1298,6 +1329,30 @@ mod sse_memory_tests {
         cpu.regs[0] = address;
         cpu.xmm[0] = [0x5a; 16];
         (cpu, memory)
+    }
+    #[test]
+    fn mmx_conversion_reads_eight_bytes_and_faults_preserve_tags() {
+        for opcode in [0x2c, 0x2d] {
+            let (mut cpu, mut memory) = run(&[0x0f, opcode, 0x00], 12280);
+            memory.store(12280, 0x400000003f800000, 8).unwrap();
+            cpu.step(&mut memory).unwrap();
+            assert_eq!(cpu.fpu.values[0], (0xffffu128 << 64) | 0x200000001);
+            assert_eq!(cpu.fpu.occupied, [true; 8]);
+            assert_eq!(cpu.fpu.top, 0);
+        }
+        let (mut cpu, mut memory) = run(&[0x0f, 0x6f, 0x00], 12284);
+        cpu.fpu.top = 3;
+        assert!(matches!(
+            cpu.step(&mut memory),
+            Err(Error::MemoryFault { .. })
+        ));
+        assert_eq!(cpu.fpu.top, 3);
+        assert_eq!(cpu.fpu.occupied, [false; 8]);
+        let (mut cpu, mut memory) = run(&[0x0f, 0x6f, 0x00], 8192);
+        cpu.fpu.control &= !4;
+        cpu.fpu.status |= 4;
+        assert!(matches!(cpu.step(&mut memory), Err(Error::ArithmeticFault)));
+        assert_eq!(cpu.fpu.occupied, [false; 8]);
     }
     #[test]
     fn insert_word_reads_only_two_bytes_at_page_end() {

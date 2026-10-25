@@ -369,13 +369,25 @@ impl X86 {
                 self.fp_exceptions(flags)?;
                 self.write_vector(m, dst, out)?;
             }
-            Op::CVTDQ2PS | Op::CVTDQ2PD => {
+            Op::CVTDQ2PS | Op::CVTDQ2PD | Op::CVTPI2PS | Op::CVTPI2PD => {
                 let dst = a.ok_or_else(bad)?;
                 let src = self.vector(m, b.ok_or_else(bad)?)?;
-                let mut out = [0; 16];
-                let width = if op == Op::CVTDQ2PS { 4 } else { 8 };
+                let mut out = if op == Op::CVTPI2PS {
+                    self.vector(m, dst)?
+                } else {
+                    [0; 16]
+                };
+                let width = if matches!(op, Op::CVTDQ2PS | Op::CVTPI2PS) {
+                    4
+                } else {
+                    8
+                };
                 let mut flags = 0;
-                for n in 0..16 / width {
+                for n in 0..if matches!(op, Op::CVTPI2PS | Op::CVTPI2PD) {
+                    2
+                } else {
+                    16 / width
+                } {
                     let integer =
                         i32::from_le_bytes(src[n * 4..n * 4 + 4].try_into().unwrap()) as i128;
                     let value = if width == 4 {
@@ -388,15 +400,28 @@ impl X86 {
                 self.fp_exceptions(flags)?;
                 self.write_vector(m, dst, out)?;
             }
-            Op::CVTPS2DQ | Op::CVTTPS2DQ | Op::CVTPD2DQ | Op::CVTTPD2DQ => {
+            Op::CVTPS2DQ
+            | Op::CVTTPS2DQ
+            | Op::CVTPD2DQ
+            | Op::CVTTPD2DQ
+            | Op::CVTPS2PI
+            | Op::CVTTPS2PI
+            | Op::CVTPD2PI
+            | Op::CVTTPD2PI => {
                 let dst = a.ok_or_else(bad)?;
                 let src = self.vector(m, b.ok_or_else(bad)?)?;
                 // The double forms clear the upper 64 bits of the destination.
                 let mut out = [0; 16];
-                let single = matches!(op, Op::CVTPS2DQ | Op::CVTTPS2DQ);
-                let truncate = matches!(op, Op::CVTTPS2DQ | Op::CVTTPD2DQ);
+                let single = matches!(
+                    op,
+                    Op::CVTPS2DQ | Op::CVTTPS2DQ | Op::CVTPS2PI | Op::CVTTPS2PI
+                );
+                let truncate = matches!(
+                    op,
+                    Op::CVTTPS2DQ | Op::CVTTPD2DQ | Op::CVTTPS2PI | Op::CVTTPD2PI
+                );
                 let mut flags = 0;
-                for n in 0..if single { 4 } else { 2 } {
+                for n in 0..if single && dst.width() == 16 { 4 } else { 2 } {
                     let value = if single {
                         to_integer::<Single>(
                             u32::from_le_bytes(src[n * 4..n * 4 + 4].try_into().unwrap()) as u64,

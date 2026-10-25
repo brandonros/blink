@@ -13,7 +13,7 @@ for name in ['hello','process','exec','kill','thread','signal','vfork']:
  fixtures[name]=path.resolve()
 for name in ['integer', 'descriptors', 'filesystem', 'restart', 'socketpair', 'timers', 'altstack', 'sigchld', 'fxstate', 'capget', 'epoll', 'prctl']:
  path=a.output/f'{name}-x86_64'
- subprocess.run(['cc','-nostdlib','-static','-ffreestanding','-fno-stack-protector','-msse2' if name=='fxstate' else '-mno-sse','-mno-mmx','-O2','-Wl,--build-id=none','-o',str(path),str(root/f'rust/fixtures/{name}-x86_64.c')],check=True)
+ subprocess.run(['cc','-nostdlib','-static','-ffreestanding','-fno-stack-protector','-msse2' if name=='fxstate' else '-mno-sse','-mmmx' if name=='fxstate' else '-mno-mmx','-O2','-Wl,--build-id=none','-o',str(path),str(root/f'rust/fixtures/{name}-x86_64.c')],check=True)
  fixtures[name]=path.resolve()
 path=a.output/'libc-x86_64'
 subprocess.run(['cc','-static','-O2','-Wl,--build-id=none','-o',str(path),str(root/'rust/fixtures/libc-x86_64.c')],check=True)

@@ -17,7 +17,8 @@ impl X86 {
         if matches!(op, Op::MOVMSKPS | Op::MOVMSKPD | Op::PEXTRW) {
             let source = self.vector(memory, b.ok_or_else(bad)?)?;
             let result = if op == Op::PEXTRW {
-                let index = (self.read(memory, c.ok_or_else(bad)?)? & 7) as usize;
+                let index = (self.read(memory, c.ok_or_else(bad)?)? as usize)
+                    & (b.ok_or_else(bad)?.width() / 2 - 1);
                 u16::from_le_bytes(source[index * 2..index * 2 + 2].try_into().unwrap()) as u64
             } else {
                 let width = if op == Op::MOVMSKPS { 4 } else { 8 };
@@ -32,7 +33,7 @@ impl X86 {
             let dst = a.ok_or_else(bad)?;
             let mut result = self.vector(memory, dst)?;
             let value = self.read(memory, b.ok_or_else(bad)?)? as u16;
-            let index = (self.read(memory, c.ok_or_else(bad)?)? & 7) as usize;
+            let index = (self.read(memory, c.ok_or_else(bad)?)? as usize) & (dst.width() / 2 - 1);
             result[index * 2..index * 2 + 2].copy_from_slice(&value.to_le_bytes());
             self.write_vector(memory, dst, result)?;
             return Ok(true);
@@ -264,12 +265,12 @@ impl X86 {
                     (-32768, 32767)
                 };
                 for (half, source) in [&left, &right].iter().enumerate() {
-                    for n in 0..16 / width {
+                    for n in 0..dst.width() / width {
                         let mut bytes = [0; 8];
                         bytes[..width].copy_from_slice(&source[n * width..(n + 1) * width]);
                         let value =
                             signed(u64::from_le_bytes(bytes), width).clamp(minimum, maximum) as u64;
-                        let offset = half * 8 + n * output_width;
+                        let offset = half * (dst.width() / 2) + n * output_width;
                         out[offset..offset + output_width]
                             .copy_from_slice(&value.to_le_bytes()[..output_width]);
                     }
