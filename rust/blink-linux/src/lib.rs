@@ -1,11 +1,15 @@
 //! Shared Linux kernel objects, independent of guest register and structure layouts.
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+mod poll;
+pub use poll::{Epoll, EventCounter, Watch, WatchKey, WeakFd};
 #[derive(Default)]
 pub struct Pipe {
     pub inode: u64,
     pub bytes: VecDeque<u8>,
     pub readers: usize,
     pub writers: usize,
+    pub read_nonblock: bool,
+    pub write_nonblock: bool,
 }
 /// A connected guest stream endpoint. Duplicates share status flags and shutdown
 /// state; the last descriptor closes each live half, including after fork/exec.
@@ -77,6 +81,8 @@ pub struct InternetSocket {
     pub ipv6: bool,
 }
 pub enum Fd {
+    Epoll(Rc<RefCell<Epoll>>),
+    Counter(Rc<RefCell<EventCounter>>),
     Internet(Rc<RefCell<InternetSocket>>),
     Socket(Rc<Socket>),
     Virtual(Rc<RefCell<VirtualOpen>>),
@@ -101,6 +107,8 @@ pub enum Fd {
 impl Clone for Fd {
     fn clone(&self) -> Self {
         match self {
+            Self::Epoll(e) => Self::Epoll(e.clone()),
+            Self::Counter(c) => Self::Counter(c.clone()),
             Self::Socket(s) => Self::Socket(s.clone()),
             Self::Internet(s) => Self::Internet(s.clone()),
             Self::Virtual(v) => Self::Virtual(v.clone()),
@@ -214,6 +222,8 @@ impl Fd {
             _ => Ok(FileStat {
                 dev: 0xffff_ff00,
                 ino: match self {
+                    Self::Epoll(e) => e.borrow().inode,
+                    Self::Counter(c) => c.borrow().inode,
                     Self::Socket(s) => s.inode,
                     Self::Internet(s) => s.borrow().inode,
                     Self::UnixSocket { inode, .. } => *inode,
@@ -224,7 +234,9 @@ impl Fd {
                     _ => unreachable!(),
                 },
                 nlink: 1,
-                mode: if matches!(
+                mode: if matches!(self, Self::Epoll(_) | Self::Counter(_)) {
+                    0o600
+                } else if matches!(
                     self,
                     Self::UnixSocket { .. } | Self::Socket(_) | Self::Internet(_)
                 ) {

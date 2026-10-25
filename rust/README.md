@@ -173,7 +173,7 @@ The preexisting C executable, config, clean-build log and hash manifest are in
 `o/rust-reference` directory. On this Linux x86_64 host, Rust, C interpreter and
 native Linux comparisons retain per-fixture results. The expanded filesystem,
 MXCSR restart, socketpair and alternate-stack cases expose additional C baseline
-differences; consult the report rather than treating the C runtime as the oracle. All 18 fixtures pass Rust/native. C differs on vfork memory sharing and
+differences; consult the report rather than treating the C runtime as the oracle. All 19 fixtures pass Rust/native. C differs on vfork memory sharing and
 returns extra F_GETFL flags on a CLOEXEC pipe in the descriptor fixture. C JIT fails the pipe/fork
 fixture and crashes during the exec fixture, including after a clean rebuild.
 Those failures remain visible; C is a comparison target, not an infallible oracle.
@@ -259,7 +259,7 @@ children, and remain through exec. Threads share their process timer; pending
 standard signals coalesce. Wall/monotonic clock queries use host clock adapters.
 Nanosleep and absolute/relative clock_nanosleep cooperate with scheduling and
 write remaining time on interruption. Virtual/profiling CPU timers and other
-clock IDs remain unsupported. The native comparison suite now has 18 compiled
+clock IDs remain unsupported. The native comparison suite now has 19 compiled
 fixtures, including real-timer delivery, fork inheritance, and interrupted sleep.
 
 Packed conversion memory operands are checked at their architectural width: CVTDQ2PD and CVTPS2PD read eight bytes, even though the decoder reports a 16-byte vector width. Page-boundary and unmasked-exception tests guard source accesses and whole-destination preservation.
@@ -323,7 +323,7 @@ by linux-oci-builder; `node-smoke.py --root ROOT` runs the version gate. The ima
 manifest is `sha256:025b8e975a61d94e33abeafaad1255ef44e4898cf1a1b6446860009c72e6d284`;
 the Node executable SHA-256 is `5a92a46a1d8279fec6776e3123ca22e26a6fddbb7cf1b55e019dbb38eea8ff26`.
 This is not yet a JavaScript execution gate: the current `--jitless -p '1 + 2'`
-probe stops at epoll_create1. CLI `--max-memory BYTES` and `--max-image-size BYTES`
+probe reaches its first guest thread and stops at prctl(PR_SET_NAME). CLI `--max-memory BYTES` and `--max-image-size BYTES`
 expose existing runtime limits for this 130 MB executable.
 
 Startup exercises word/dword packed shifts, saturating packing, lane shuffles,
@@ -341,3 +341,19 @@ path. The Linux C reference was built with DISABLE_VFS, so BLINK_PREFIX does not
 root that binary; those controls are not equivalent to the Rust rooted workload.
 The C configuration/artifacts remain preserved rather than silently rebuilt with
 different features for this comparison.
+
+
+## Guest event loops
+
+Guest-owned eventfd counters and epoll support level readiness, one-shot rearming,
+fair delivery, dup/fork sharing, and watch removal after the last open description
+closes. Watches do not retain their target descriptors. epoll_pwait restores the
+caller's signal mask on return or interruption, including with SA_RESTART.
+Nonblocking pipe endpoints share their status flags across dup/fork and implement
+EAGAIN for empty reads/full writes, vectored I/O, and bounded atomic writes.
+
+The epoll native fixture checks these lifetimes, descriptor reuse, semaphore and
+overflow counters, bad output pointers, temporary signal masks and nonblocking
+pipes. Edge-triggered/exclusive/nested epoll remain explicitly unsupported.
+Optional io_uring and membarrier return ENOSYS, allowing guest libraries to use
+their fallback paths. Obsolete CLONE_DETACHED is ignored as on Linux.

@@ -10,7 +10,7 @@ _start:
  lea parent_tls(%rip), %rsi
  mov $158, %eax
  syscall
- mov $0x390f00, %edi
+ mov $0x7d0f00, %edi
  lea child_stack_end(%rip), %rsi
  lea tid(%rip), %rdx
  lea tid(%rip), %r10

@@ -1,6 +1,7 @@
 //! Cooperative guest processes. No host fork, host signals, or blocking guest pipes.
 mod credentials;
 mod internet;
+mod poll;
 mod signals;
 mod socket;
 mod time;
@@ -403,6 +404,10 @@ pub(super) fn run(
                         169 => 96,
                         25 => 72,
                         160 => 63,
+                        19 => 290,
+                        20 => 291,
+                        21 => 233,
+                        22 => 281,
                         90 => 125,
                         174 => 102,
                         175 => 107,
@@ -788,6 +793,21 @@ pub(super) fn run(
                     19 => {
                         let fd = process.fds.borrow().get(&(args[0] as i32)).cloned();
                         match fd.as_ref() {
+                            Some(Fd::Reader(pipe)) => {
+                                match pipe_readv(
+                                    &mut process.memory.borrow_mut(),
+                                    pipe,
+                                    args[1],
+                                    args[2],
+                                )? {
+                                    Some(result) => result,
+                                    None => {
+                                        process.pending = Some((number, args));
+                                        event = Event::Blocked;
+                                        break;
+                                    }
+                                }
+                            }
                             Some(Fd::Internet(endpoint)) => {
                                 let result = internet::vectored(
                                     &mut process.memory.borrow_mut(),
@@ -1041,6 +1061,25 @@ pub(super) fn run(
                             _ => errno(88),
                         }
                     }
+                    // Optional membarrier and io_uring are absent in this guest kernel.
+                    // Libraries can select their supported fallback implementations.
+                    324 | 425..=427 => errno(38),
+                    213 | 284 | 290 | 291 => poll::create(&process, nr, args, &mut next_pipe)?,
+                    233 => poll::control(&process, args, config.guest_arch)?,
+                    232 | 281 => match poll::wait(&mut process, nr, args, config.guest_arch)? {
+                        Some(result) => {
+                            process.poll_deadline = None;
+                            if let Some(mask) = process.suspend_mask.take() {
+                                process.signal_mask = mask;
+                            }
+                            result
+                        }
+                        None => {
+                            process.pending = Some((number, args));
+                            event = Event::Blocked;
+                            break;
+                        }
+                    },
                     7 => {
                         if args[1] > 1024 {
                             errno(22)
@@ -1141,6 +1180,18 @@ pub(super) fn run(
                                         Err(_) => errno(14),
                                         Ok(flag) => {
                                             match process.fds.borrow().get(&(args[0] as i32)) {
+                                                Some(Fd::Reader(p)) => {
+                                                    p.borrow_mut().read_nonblock = flag != 0;
+                                                    0
+                                                }
+                                                Some(Fd::Writer(p)) => {
+                                                    p.borrow_mut().write_nonblock = flag != 0;
+                                                    0
+                                                }
+                                                Some(Fd::Counter(c)) => {
+                                                    c.borrow_mut().nonblock = flag != 0;
+                                                    0
+                                                }
                                                 Some(Fd::Internet(s)) => {
                                                     s.borrow_mut().nonblock = flag != 0;
                                                     0
@@ -1213,6 +1264,10 @@ pub(super) fn run(
                                     0
                                 }
                                 3 => match &fd {
+                                    Fd::Epoll(_) => 2,
+                                    Fd::Counter(c) => {
+                                        2 | if c.borrow().nonblock { 0x800 } else { 0 }
+                                    }
                                     Fd::Virtual(v) => {
                                         let v = v.borrow();
                                         let mode = if v.read && v.write {
@@ -1237,8 +1292,18 @@ pub(super) fn run(
                                     Fd::UnixSocket { nonblock, .. } => {
                                         2 | if *nonblock { 0x800 } else { 0 }
                                     }
-                                    Fd::Stdin | Fd::Reader(_) => 0,
-                                    Fd::Stdout | Fd::Stderr | Fd::Writer(_) => 1,
+                                    Fd::Stdin => 0,
+                                    Fd::Reader(p) => {
+                                        if p.borrow().read_nonblock {
+                                            0x800
+                                        } else {
+                                            0
+                                        }
+                                    }
+                                    Fd::Writer(p) => {
+                                        1 | if p.borrow().write_nonblock { 0x800 } else { 0 }
+                                    }
+                                    Fd::Stdout | Fd::Stderr => 1,
                                     Fd::File {
                                         read,
                                         write,
@@ -1255,6 +1320,18 @@ pub(super) fn run(
                                     }
                                 },
                                 4 => match &fd {
+                                    Fd::Reader(p) => {
+                                        p.borrow_mut().read_nonblock = args[2] & 0x800 != 0;
+                                        0
+                                    }
+                                    Fd::Writer(p) => {
+                                        p.borrow_mut().write_nonblock = args[2] & 0x800 != 0;
+                                        0
+                                    }
+                                    Fd::Counter(c) => {
+                                        c.borrow_mut().nonblock = args[2] & 0x800 != 0;
+                                        0
+                                    }
                                     Fd::Internet(s) => {
                                         s.borrow_mut().nonblock = args[2] & 0x800 != 0;
                                         0
@@ -2233,6 +2310,7 @@ pub(super) fn run(
                                                 | 0x80000
                                                 | 0x100000
                                                 | 0x200000
+                                                | 0x400000 // obsolete CLONE_DETACHED, ignored by Linux
                                                 | 0x1000000)
                                             != 0
                                         || args[1] == 0)))
@@ -2483,7 +2561,7 @@ pub(super) fn run(
                         }
                     }
                     22 | 293 => {
-                        if nr == 293 && args[1] & !0x80000 != 0 {
+                        if nr == 293 && args[1] & !0x80800 != 0 {
                             return Err(Error::UnsupportedSyscall(number));
                         }
                         if process
@@ -2498,6 +2576,8 @@ pub(super) fn run(
                         } else {
                             let p = Rc::new(RefCell::new(Pipe {
                                 inode: next_pipe,
+                                read_nonblock: nr == 293 && args[1] & 0x800 != 0,
+                                write_nonblock: nr == 293 && args[1] & 0x800 != 0,
                                 bytes: VecDeque::new(),
                                 readers: 1,
                                 writers: 1,
@@ -2568,7 +2648,23 @@ pub(super) fn run(
                         let fd = process.fds.borrow().get(&(args[0] as i32)).cloned();
                         if let Some(fd) = fd {
                             let count = args[2].min(0x7ffff000) as usize;
-                            if process
+                            if let Fd::Counter(counter) = &fd {
+                                let result = poll::transfer(
+                                    &mut process.memory.borrow_mut(),
+                                    &mut counter.borrow_mut(),
+                                    args[1],
+                                    count,
+                                    nr == 1,
+                                )?;
+                                match result {
+                                    Some(result) => result,
+                                    None => {
+                                        process.pending = Some((number, args));
+                                        event = Event::Blocked;
+                                        break;
+                                    }
+                                }
+                            } else if process
                                 .memory
                                 .borrow()
                                 .check(
@@ -2579,12 +2675,14 @@ pub(super) fn run(
                                 .is_err()
                             {
                                 errno(14)
-                            } else if count == 0 && !matches!(&fd, Fd::Socket(_) | Fd::Internet(_))
+                            } else if count == 0
+                                && !matches!(&fd, Fd::Socket(_) | Fd::Internet(_) | Fd::Counter(_))
                             {
                                 0
                             } else {
                                 match (nr, &fd) {
                                     (0, Fd::Stdin) => 0,
+                                    (_, Fd::Epoll(_)) => errno(22),
                                     (_, Fd::Virtual(v)) => {
                                         let mut v = v.borrow_mut();
                                         if (nr == 0 && !v.read) || (nr == 1 && !v.write) {
@@ -2715,6 +2813,10 @@ pub(super) fn run(
                                     (0, Fd::Reader(pipe)) => {
                                         let mut pipe = pipe.borrow_mut();
                                         if pipe.bytes.is_empty() && pipe.writers != 0 {
+                                            if pipe.read_nonblock {
+                                                process.cpu.cpu().set_result(errno(11));
+                                                continue;
+                                            }
                                             process.pending = Some((number, args));
                                             event = Event::Blocked;
                                             break;
@@ -2740,6 +2842,10 @@ pub(super) fn run(
                                         }
                                         let capacity = 65536 - pipe.bytes.len();
                                         if capacity == 0 || (count <= 4096 && capacity < count) {
+                                            if pipe.write_nonblock {
+                                                process.cpu.cpu().set_result(errno(11));
+                                                continue;
+                                            }
                                             process.pending = Some((number, args));
                                             event = Event::Blocked;
                                             break;
@@ -3252,6 +3358,55 @@ fn map_memory(
     Ok(address)
 }
 
+fn pipe_readv(
+    memory: &mut Memory,
+    pipe: &Rc<RefCell<Pipe>>,
+    address: u64,
+    count: u64,
+) -> Result<Option<u64>> {
+    if count > 1024 {
+        return Ok(Some(errno(22)));
+    }
+    if memory
+        .check(address, count as usize * 16, Access::Read)
+        .is_err()
+    {
+        return Ok(Some(errno(14)));
+    }
+    let mut vectors = Vec::with_capacity(count as usize);
+    let mut total = 0u64;
+    for n in 0..count {
+        let base = memory.load(address + n * 16, 8)?;
+        let length = memory.load(address + n * 16 + 8, 8)?;
+        if length > 0x7ffff000 || total + length > 0x7ffff000 {
+            return Ok(Some(errno(22)));
+        }
+        total += length;
+        vectors.push((base, length));
+    }
+    if total == 0 {
+        return Ok(Some(0));
+    }
+    let mut pipe = pipe.borrow_mut();
+    if pipe.bytes.is_empty() && pipe.writers != 0 {
+        return Ok(pipe.read_nonblock.then_some(errno(11)));
+    }
+    let mut copied = 0;
+    for (base, length) in vectors {
+        let length = (length as usize).min(pipe.bytes.len());
+        if length == 0 {
+            continue;
+        }
+        if memory.check(base, length, Access::Write).is_err() {
+            return Ok(Some(if copied == 0 { errno(14) } else { copied }));
+        }
+        let bytes: Vec<_> = pipe.bytes.drain(..length).collect();
+        memory.write(base, &bytes)?;
+        copied += length as u64;
+    }
+    Ok(Some(copied))
+}
+
 // Gather only the bytes that fit in a bounded virtual pipe. Writes no larger
 // than Linux PIPE_BUF are atomic across the cooperative guest scheduler.
 fn pipe_writev(
@@ -3283,7 +3438,7 @@ fn pipe_writev(
     }
     let capacity = 65536 - pipe.bytes.len();
     if capacity == 0 || (total <= 4096 && (capacity as u64) < total) {
-        return Ok(None);
+        return Ok(pipe.write_nonblock.then_some(errno(11)));
     }
     let mut bytes = Vec::with_capacity(capacity.min(total as usize));
     for (base, length) in vectors {
@@ -3311,6 +3466,8 @@ fn pipe_writev(
 
 fn poll_events(fd: Option<&Fd>, wanted: u16) -> u16 {
     let available = match fd {
+        Some(Fd::Counter(c)) => poll::counter_events(&c.borrow()),
+        Some(Fd::Epoll(e)) => u16::from(poll::readable(&e.borrow())),
         Some(Fd::Virtual(_)) => 1 | 4 | 64 | 256,
         None => return 32, // POLLNVAL
         Some(Fd::Reader(p)) => {
@@ -3557,7 +3714,7 @@ fn send_file(
         }
         let capacity = 65536 - pipe.bytes.len();
         if count > 0 && capacity == 0 {
-            return Ok(None);
+            return Ok(pipe.write_nonblock.then_some(errno(11)));
         }
         count = count.min(capacity);
     }
