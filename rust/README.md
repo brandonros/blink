@@ -290,7 +290,7 @@ loads/stores, and stack operations. Signal handlers start with a fresh x87 state
 sigreturn restores the saved stack and control word. An unmasked exception
 preserves the destination/stack and faults on the next waiting instruction.
 
-`python3 rust/x87-regressions.py` compares 151,398 native AMD64 result/status records,
+`python3 rust/x87-regressions.py` compares 166,698 native AMD64 result/status records,
 including 80-bit extrema, NaNs, denormals, all three precision controls, four rounding modes, comparisons and
 conversions. Tests also cover a ten-byte source at a page boundary, masked stack
 overflow, deferred faults, and signal-frame preservation. The adapter handles
@@ -405,7 +405,7 @@ Native tests retain the distinction between unaligned MOVNTQ (accepted) and
 aligned-only XMM streaming stores.
 
 
-FCMOVcc and x87 empty-stack behavior have a separate 4,608-record native gate.
+FCMOVcc and x87 empty-stack behavior have a separate 6,048-record native gate.
 It includes both taken and untaken conditional moves, signaling/quiet NaNs and
 empty source/destination slots. Empty-stack arithmetic and sign operations
 produce the negative indefinite value even when another NaN is available.
@@ -479,7 +479,7 @@ ZF-only updates and CX16 alignment checks. CPUID advertises CX8/CX16 after
 native comparisons and fault-state tests; CI replays the fixture on Darwin arm64.
 
 FSQRT uses a 128-bit integer radicand and exact remainder, rounding directly
-to the selected 24/53/64-bit significand. The x87 oracle now compares 151,398
+to the selected 24/53/64-bit significand. The x87 oracle now compares 166,698
 records, including 49,248 extra square-root cases with extended-format edge
 encodings, exponent extremes, random significands and all rounding/precision
 controls. Empty-stack and deferred unmasked-invalid behavior have focused tests.
@@ -496,3 +496,9 @@ logical stack ordering and exception masks. Save/reset and load round trips matc
 native Linux for both formats; CI replays that fixture on Apple Silicon.
 Cross-page failures preserve the entire FPU state and destination bytes.
 FNINIT and FNSAVE reset control/tag state while preserving register contents.
+
+FSCALE scales extended values with truncation of ST(1), rounding of the result
+and overflow/underflow flags, without narrowing to the precision-control width.
+FXTRACT produces both the signed significand and exponent, including zeros,
+infinities, NaNs and denormals. Native tests cover both outputs and both stack
+overflow destinations; unmasked overflow leaves both destinations unchanged.

@@ -388,6 +388,8 @@ impl X86 {
                 | Op::FTST
                 | Op::FRNDINT
                 | Op::FSQRT
+                | Op::FSCALE
+                | Op::FXTRACT
         ) {
             return Ok(false);
         }
@@ -669,6 +671,143 @@ impl X86 {
                     if matches!(op, Op::FCOMPP | Op::FUCOMPP) {
                         self.fpu.pop();
                     }
+                }
+            }
+            Op::FXTRACT => {
+                let mut exceptions = 0;
+                let bits = self.fpu.get(0, &mut exceptions);
+                let value = Extended::from_bits(bits);
+                let raw_exp = ((bits >> 64) & 0x7fff) as i32;
+                let (mut significand, mut exponent) =
+                    if exceptions != 0 || (raw_exp != 0 && bits & (1 << 63) == 0) {
+                        exceptions |= 1;
+                        (INDEFINITE, INDEFINITE)
+                    } else if value.is_nan() {
+                        if value.is_signaling() {
+                            exceptions |= 1;
+                        }
+                        (bits | (1 << 62), bits | (1 << 62))
+                    } else if value.is_zero() {
+                        exceptions |= 4;
+                        (bits, (-Extended::INFINITY).to_bits())
+                    } else if value.is_infinite() {
+                        (bits, Extended::INFINITY.to_bits())
+                    } else {
+                        let mut fraction = bits as u64;
+                        let mut exponent = raw_exp.max(1) - 16383;
+                        if raw_exp == 0 {
+                            exceptions |= 2;
+                        }
+                        while fraction & (1 << 63) == 0 {
+                            fraction <<= 1;
+                            exponent -= 1;
+                        }
+                        (
+                            fraction as u128 | (0x3fffu128 << 64) | (bits & (1 << 79)),
+                            Extended::from_i128(exponent as i128).value.to_bits(),
+                        )
+                    };
+                let next = self.fpu.top.wrapping_sub(1) & 7;
+                self.fpu.status &= !0x200;
+                if self.fpu.tags[next] != 3 {
+                    exceptions |= 0x41;
+                    self.fpu.status |= 0x200;
+                    significand = INDEFINITE;
+                    exponent = INDEFINITE;
+                }
+                if self.fpu.exception(exceptions) {
+                    self.fpu.set(0, exponent);
+                    self.fpu.top = next;
+                    self.fpu.set(0, significand);
+                }
+            }
+            Op::FSCALE => {
+                let mut exceptions = 0;
+                let left = self.fpu.get(0, &mut exceptions);
+                let right = self.fpu.get(1, &mut exceptions);
+                let x = Extended::from_bits(left);
+                let y = Extended::from_bits(right);
+                let unsupported =
+                    |bits: u128| ((bits >> 64) & 0x7fff) != 0 && bits & (1 << 63) == 0;
+                let mut rounded_up = false;
+                let result = if exceptions != 0 || unsupported(left) || unsupported(right) {
+                    exceptions |= 1;
+                    INDEFINITE
+                } else if x.is_nan() || y.is_nan() {
+                    if x.is_signaling() || y.is_signaling() {
+                        exceptions |= 1;
+                    }
+                    let chosen = if !x.is_nan() {
+                        right
+                    } else if !y.is_nan() {
+                        left
+                    } else if x.is_signaling() != y.is_signaling() {
+                        if x.is_signaling() {
+                            right
+                        } else {
+                            left
+                        }
+                    } else if left as u64 != right as u64 {
+                        if left as u64 > right as u64 {
+                            left
+                        } else {
+                            right
+                        }
+                    } else {
+                        left.min(right)
+                    };
+                    chosen | (1 << 62)
+                } else {
+                    if x.is_denormal() || y.is_denormal() {
+                        exceptions |= 2;
+                    }
+                    if y.is_infinite() {
+                        if (x.is_zero() && !y.is_negative()) || (x.is_infinite() && y.is_negative())
+                        {
+                            exceptions = 1;
+                            INDEFINITE
+                        } else if y.is_negative() {
+                            Extended::ZERO.copy_sign(x).to_bits()
+                        } else {
+                            Extended::INFINITY.copy_sign(x).to_bits()
+                        }
+                    } else if x.is_zero() || x.is_infinite() {
+                        left
+                    } else {
+                        let limit = Extended::from_u128(40000).value;
+                        let exponent = if y.abs() > limit {
+                            if y.is_negative() {
+                                -40000
+                            } else {
+                                40000
+                            }
+                        } else {
+                            y.to_i128_r(32, Round::TowardZero, &mut false).value as i32
+                        };
+                        let wide: IeeeFloat<Intermediate> = x.convert(&mut false).value;
+                        let scaled = wide.scalbn(exponent);
+                        let converted: rustc_apfloat::StatusAnd<Extended> =
+                            scaled.convert_r(self.fpu.round(), &mut false);
+                        exceptions |= flags(converted.status);
+                        let widened: IeeeFloat<Intermediate> =
+                            converted.value.convert(&mut false).value;
+                        rounded_up = widened.abs() > scaled.abs();
+                        if converted.value.abs() == Extended::largest()
+                            && converted.status.contains(Status::INEXACT)
+                            && scaled.abs()
+                                >= IeeeFloat::<Intermediate>::from_u128(1).value.scalbn(16384)
+                        {
+                            exceptions |= 8;
+                        }
+                        converted.value.to_bits()
+                    }
+                };
+                self.fpu.status &= !0x200;
+                if rounded_up {
+                    self.fpu.status |= 0x200;
+                }
+                if self.fpu.exception(exceptions) {
+                    self.fpu.set(0, result);
                 }
             }
             Op::FSQRT => {
@@ -1094,6 +1233,20 @@ mod tests {
                 .unwrap();
             assert_eq!(bytes, [0xa5; 16]);
         }
+    }
+    #[test]
+    fn extract_unmasked_stack_overflow_preserves_both_destinations() {
+        let (mut cpu, mut memory) = machine(&[0xd9, 0xf4]);
+        for n in 0..8 {
+            cpu.fpu.push(Extended::from_u128(n + 1).value.to_bits(), 0);
+        }
+        cpu.fpu.control &= !1;
+        let before = cpu.fpu.clone();
+        cpu.step(&mut memory).unwrap();
+        assert_eq!(cpu.fpu.values, before.values);
+        assert_eq!(cpu.fpu.tags, before.tags);
+        assert_eq!(cpu.fpu.top, before.top);
+        assert_eq!(cpu.fpu.status() & 0x8241, 0x8241);
     }
     #[test]
     fn square_root_empty_stack_and_unmasked_invalid_preserve_state() {
