@@ -554,12 +554,13 @@ Focused boundary cases check tininess before rounding into minimum normal.
 FPATAN uses software arithmetic with 126-bit intermediate significands and
 quadrant reduction; it never calls the host floating-point environment. Its
 approximate result can differ from a physical CPU in the last bit. The separate
-`transcend-regressions.py` gate checks 119,472 records against native state and an
+`transcend-regressions.py` gate checks 298,680 records against native state and an
 independent 200-bit mpmath 1.3.0 reference. The explicit regression bounds are one
 extended ulp for nearest rounding and 1.5 ulps for directed rounding. C1 describes
 each implementation's internal rounding and is excluded from native bit equality;
-other status bits, stack effects and special results must agree. Observed maxima
-were about 1.265 ulps native and 1 ulp Rust; 4,038 results differed in their last bit.
+other status bits, stack effects and special results must agree, except the
+explicit minimum-normal FPATAN underflow boundary described below. Observed maxima
+were about 1.265 ulps native and 1 ulp Rust; 11,256 results differed in their last bit.
 CI replays the fixture and accuracy checks on Apple Silicon. The exact arithmetic
 oracle remains separate and bit-exact. These corpora are not exhaustive proofs,
 and the complete x87 FPU feature remains unadvertised.
@@ -576,3 +577,18 @@ its defined range fail explicitly. FYL2X spans the extended exponent range.
 FYL2XP1 numerical qualification uses |x| < 1/4, plus zero/NaN/infinity states,
 within its documented accurate input range. Logarithm zero/divide-by-zero and
 invalid-operation priority are checked independently of approximation error.
+
+FSIN, FCOS, FSINCOS and FPTAN use the same software intermediates, quadrant
+reduction and Taylor series. The oracle checks both stack outputs, signed zeros,
+NaNs, and C2/no-push rejection at |x| >= 2^63. Within |x| <= pi/4, the numerical
+bounds above apply. Outside that interval, the independent gate bounds sine/cosine
+absolute error by 2^-62 * max(1, |x|), and tangent angular residual modulo pi by
+the same amount. This explicitly allows physical CPUs' limited pi reduction;
+it is not an ulp-accuracy claim for large angles or values near zeros/poles.
+
+At FPATAN(minimum-normal / 1), local Intel hardware and CI native hardware disagree
+on underflow status because the mathematical correction is far below extended
+precision. The gate permits only UE differences for that exact input boundary
+(and its signed/pseudo-denormal forms), retaining every occurrence in the report.
+All other exception comparisons remain strict. C1 and last-bit differences remain
+expected for approximate instructions, and full FPU support is still incomplete.

@@ -44,23 +44,33 @@ def decode(data):
 errors = []
 max_error = {'native': mp.mpf(0), 'rust': mp.mpf(0)}
 last_bit_differences = 0
+underflow_boundary_differences = []
+max_reduction_fraction = {'native': mp.mpf(0), 'rust': mp.mpf(0)}
 for index in range(len(native)//40):
     a, b = native[index*40:(index+1)*40], rust.stdout[index*40:(index+1)*40]
     assert a[:20] == b[:20] and a[32:] == b[32:], f'input/record mismatch {index}'
     # C1 describes rounding within each implementation's approximation. Other
     # status bits, stack effects and exceptions must agree with the native run.
     native_sw, rust_sw = struct.unpack('<H', a[30:32])[0], struct.unpack('<H', b[30:32])[0]
-    if (native_sw ^ rust_sw) & ~0x200:
-        errors.append(dict(record=index, reason='status', native=hex(native_sw), rust=hex(rust_sw)))
     x, y = decode(a[:10]), decode(a[10:20])
     operation = struct.unpack('<H', a[34:36])[0]
-    if x is None or (operation != 1 and y is None):
+    status_difference = (native_sw ^ rust_sw) & ~0x200
+    # At atan(min_normal/1), the mathematical correction is vastly below
+    # extended precision. Local Intel and CI native CPUs disagree on UE:
+    # one treats the approximation as normal, another detects tiny-before-round.
+    # Permit only that flag at this exact boundary, and retain it in the report.
+    if (status_difference == 0x10 and operation == 0 and x == 1
+            and y is not None and abs(y) == mp.power(2, -16382)):
+        underflow_boundary_differences.append(dict(record=index, native=hex(native_sw), rust=hex(rust_sw)))
+    elif status_difference:
+        errors.append(dict(record=index, reason='status', native=hex(native_sw), rust=hex(rust_sw)))
+    if x is None or (operation in (0, 2, 3) and y is None):
         if a[20:30] != b[20:30]:
             errors.append(dict(record=index, reason='special result'))
         continue
     # mpmath does not preserve signed zero. Native comparison covers its sign
     # and the quadrant cases whose input contains zero or infinity.
-    if not x or mp.isinf(x) or (operation != 1 and (not y or mp.isinf(y))):
+    if not x or mp.isinf(x) or (operation in (0, 2, 3) and (not y or mp.isinf(y))):
         if a[20:30] != b[20:30]:
             errors.append(dict(record=index, reason='zero/infinity quadrant'))
         continue
@@ -68,7 +78,12 @@ for index in range(len(native)//40):
         if a[20:30] != b[20:30]:
             errors.append(dict(record=index, reason='invalid logarithm'))
         continue
-    reference = (mp.atan2(y, x) if operation == 0 else mp.expm1(x*mp.ln(2)) if operation == 1
+    if operation >= 4 and (abs(x) >= mp.power(2, 63) or operation == 9):
+        if a[20:30] != b[20:30]:
+            errors.append(dict(record=index, reason='range or pushed constant'))
+        continue
+    reference = (mp.sin(x) if operation in (4, 8) else mp.cos(x) if operation in (5, 7)
+                 else mp.tan(x) if operation == 6 else mp.atan2(y, x) if operation == 0 else mp.expm1(x*mp.ln(2)) if operation == 1
                  else y*mp.log(x, 2) if operation == 2 else y*mp.log1p(x)/mp.ln(2))
     if not reference and a[20:30] != b[20:30]:
         errors.append(dict(record=index, reason='exact zero'))
@@ -83,6 +98,19 @@ for index in range(len(native)//40):
         if actual is None:
             errors.append(dict(record=index, reason=engine+' nonfinite result'))
             continue
+        # Outside the small-angle interval, hardware's finite pi reduction
+        # dominates relative error near zeros/poles. Check absolute phase-scale
+        # error for sine/cosine, and angular residual modulo pi for tangent.
+        if operation >= 4 and abs(x) > mp.pi/4:
+            allowance = mp.power(2, -62)*max(1, abs(x))
+            error = abs(actual-reference)
+            if operation == 6:
+                error = abs(mp.atan(actual)-mp.atan(reference))
+                error = min(error, abs(mp.pi-error))
+            max_reduction_fraction[engine] = max(max_reduction_fraction[engine], error/allowance)
+            if error > allowance:
+                errors.append(dict(record=index, reason=engine+' range reduction', error=float(error), bound=float(allowance)))
+            continue
         # One extended-precision ulp at the exact result, with subnormal spacing.
         exponent = int(mp.floor(mp.log(abs(reference), 2))) if reference else -16382
         ulp = mp.power(2, max(exponent, -16382)-63)
@@ -96,7 +124,8 @@ for index in range(len(native)//40):
         if error > limit:
             errors.append(dict(record=index, reason=engine+' accuracy', ulps=float(error)))
 report = dict(records=len(native)//40, fixture_sha256=hashlib.sha256(fixture.read_bytes()).hexdigest(),
-              last_bit_differences=last_bit_differences, max_error_ulps={k:float(v) for k,v in max_error.items()}, differences=errors)
+              last_bit_differences=last_bit_differences, underflow_boundary_differences=underflow_boundary_differences,
+              max_reduction_bound_fraction={k:float(v) for k,v in max_reduction_fraction.items()}, max_error_ulps={k:float(v) for k,v in max_error.items()}, differences=errors)
 (output/'results.json').write_text(json.dumps(report, indent=2)+'\n')
 print(json.dumps({k:v for k,v in report.items() if k!='differences'}))
 if errors:

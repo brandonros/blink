@@ -287,6 +287,39 @@ fn log2_plus_one(x: Math) -> Math {
         log2_positive((one + x).value)
     }
 }
+fn sin_cos(x: Extended) -> (Math, Math) {
+    let wx: Math = x.convert(&mut false).value;
+    let half_pi = pi().scalbn(-1);
+    let quadrant = (wx / half_pi)
+        .value
+        .round_to_integral(Round::NearestTiesToEven)
+        .value
+        .to_i128_r(64, Round::TowardZero, &mut false)
+        .value;
+    let r = (wx - (Math::from_i128(quadrant).value * half_pi).value).value;
+    let square = -(r * r).value;
+    let mut sine = r;
+    let mut cosine = Math::from_u128(1).value;
+    let mut sin_term = sine;
+    let mut cos_term = cosine;
+    for n in 1..128 {
+        sin_term = ((sin_term * square).value / Math::from_u128((2 * n) * (2 * n + 1)).value).value;
+        cos_term = ((cos_term * square).value / Math::from_u128((2 * n - 1) * (2 * n)).value).value;
+        let next_sin = (sine + sin_term).value;
+        let next_cos = (cosine + cos_term).value;
+        if next_sin == sine && next_cos == cosine {
+            break;
+        }
+        sine = next_sin;
+        cosine = next_cos;
+    }
+    match quadrant.rem_euclid(4) {
+        0 => (sine, cosine),
+        1 => (cosine, -sine),
+        2 => (-sine, -cosine),
+        _ => (-cosine, sine),
+    }
+}
 const INDEFINITE: u128 = 0xffff_c000_0000_0000_0000;
 fn unsupported_extended(bits: u128) -> bool {
     ((bits >> 64) & 0x7fff) != 0 && bits & (1 << 63) == 0
@@ -562,6 +595,10 @@ impl X86 {
                 | Op::F2XM1
                 | Op::FYL2X
                 | Op::FYL2XP1
+                | Op::FSIN
+                | Op::FCOS
+                | Op::FSINCOS
+                | Op::FPTAN
                 | Op::FPREM1
                 | Op::FXTRACT
         ) {
@@ -960,6 +997,63 @@ impl X86 {
                     self.fpu.set(0, exponent);
                     self.fpu.top = next;
                     self.fpu.set(0, significand);
+                }
+            }
+            Op::FSIN | Op::FCOS | Op::FSINCOS | Op::FPTAN => {
+                let mut exceptions = 0;
+                let bits = self.fpu.get(0, &mut exceptions);
+                let value = arithmetic_input(bits, &mut exceptions);
+                let push = matches!(op, Op::FSINCOS | Op::FPTAN);
+                let (mut first, mut second, raised, up) = if unsupported_extended(bits)
+                    || exceptions & 0x40 != 0
+                    || value.is_infinite()
+                {
+                    (INDEFINITE, INDEFINITE, 1, false)
+                } else if value.is_nan() {
+                    let nan = bits | (1 << 62);
+                    (nan, nan, u16::from(value.is_signaling()), false)
+                } else if value.abs() >= Extended::from_u128(1).value.scalbn(63) {
+                    self.fpu.status |= 0x400;
+                    return Ok(true);
+                } else {
+                    let (sin, cos) = sin_cos(value);
+                    let precision = !value.is_zero();
+                    let (sin_bits, sin_flags, sin_up) =
+                        transcend_result(sin, self.fpu.round(), precision);
+                    let (cos_bits, cos_flags, cos_up) =
+                        transcend_result(cos, self.fpu.round(), precision);
+                    match op {
+                        Op::FSIN => (sin_bits, 0, sin_flags, sin_up),
+                        Op::FCOS => (cos_bits, 0, cos_flags, cos_up),
+                        Op::FSINCOS => (cos_bits, sin_bits, sin_flags | cos_flags, cos_up),
+                        _ => {
+                            let (tan_bits, flags, up) =
+                                transcend_result((sin / cos).value, self.fpu.round(), precision);
+                            (Extended::from_u128(1).value.to_bits(), tan_bits, flags, up)
+                        }
+                    }
+                };
+                exceptions |= raised;
+                if exceptions & 1 != 0 {
+                    exceptions &= !2;
+                }
+                self.fpu.status &= !0x600;
+                if up {
+                    self.fpu.status |= 0x200;
+                }
+                let next = self.fpu.top.wrapping_sub(1) & 7;
+                if push && self.fpu.tags[next] != 3 {
+                    exceptions |= 0x41;
+                    self.fpu.status |= 0x200;
+                    first = INDEFINITE;
+                    second = INDEFINITE;
+                }
+                if self.fpu.exception(exceptions) {
+                    if push {
+                        self.fpu.set(0, second);
+                        self.fpu.top = next;
+                    }
+                    self.fpu.set(0, first);
                 }
             }
             Op::FYL2X | Op::FYL2XP1 => {
@@ -1812,6 +1906,56 @@ mod tests {
             cpu.x87(&mut memory, op, None, None, 0x1000).unwrap();
             assert_eq!(cpu.fpu.get(0, &mut 0), x.to_bits());
             assert_eq!(cpu.fpu.status() & 0x8081, 0x8081);
+        }
+    }
+    #[test]
+    fn trig_range_rejection_preserves_registers_and_stack() {
+        for op in [Op::FSIN, Op::FCOS, Op::FSINCOS, Op::FPTAN] {
+            for sign in [1i128, -1] {
+                let (mut cpu, mut memory) = machine(&[0x90]);
+                cpu.fpu
+                    .set(0, Extended::from_i128(sign).value.scalbn(63).to_bits());
+                let before = cpu.fpu.clone();
+                cpu.x87(&mut memory, op, None, None, 0x1000).unwrap();
+                assert_eq!(cpu.fpu.values, before.values);
+                assert_eq!(cpu.fpu.tags, before.tags);
+                assert_eq!(cpu.fpu.top, before.top);
+                assert_eq!(cpu.fpu.status() & 0x47f, 0x400);
+            }
+        }
+    }
+    #[test]
+    fn trig_stack_overflow_invalid_and_zero_outputs() {
+        for op in [Op::FSINCOS, Op::FPTAN] {
+            let (mut cpu, mut memory) = machine(&[0x90]);
+            cpu.fpu.set(0, 1u128 << 79); // negative zero
+            cpu.x87(&mut memory, op, None, None, 0x1000).unwrap();
+            assert_eq!(
+                cpu.fpu.get(0, &mut 0),
+                Extended::from_u128(1).value.to_bits()
+            );
+            assert_eq!(cpu.fpu.get(1, &mut 0), 1u128 << 79);
+            assert_eq!(cpu.fpu.status() & 0x7f, 0);
+            for masked in [true, false] {
+                cpu.fpu = Fpu::default();
+                for n in 0..8 {
+                    cpu.fpu.push(Extended::from_u128(n + 1).value.to_bits(), 0);
+                }
+                if !masked {
+                    cpu.fpu.control &= !1;
+                }
+                let before = cpu.fpu.clone();
+                cpu.x87(&mut memory, op, None, None, 0x1000).unwrap();
+                assert_eq!(cpu.fpu.status() & 0x241, 0x241);
+                if masked {
+                    assert_eq!(cpu.fpu.get(0, &mut 0), INDEFINITE);
+                    assert_eq!(cpu.fpu.get(1, &mut 0), INDEFINITE);
+                } else {
+                    assert_eq!(cpu.fpu.values, before.values);
+                    assert_eq!(cpu.fpu.tags, before.tags);
+                    assert_eq!(cpu.fpu.top, before.top);
+                }
+            }
         }
     }
     #[test]
