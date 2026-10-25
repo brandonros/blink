@@ -115,7 +115,11 @@ Broad ISA/SIMD/FPU coverage, shared file mappings, remaining directory-relative
 *at operations, broader VFS/procfs, UDP/DNS, and JIT remain. ARM64 signal frames,
 threaded exec, queued realtime signals, job control,
 handlers for memory/illegal-instruction faults remain.
-No image-build checkpoint or verifier has passed with Rust.
+A small Debian Dockerfile now passes seven checkpoints through the persistent
+Rust worker and produces a verified two-layer OCI image, including a successful
+reconstructed-root command and receipt-preserving resume. This is covered by
+`linux-oci-builder/scripts/test-rust-build.py`; the actual agent-platform
+Claude-base/code-server builds and their full 26-checkpoint gate remain unpassed.
 
 Memory limits count unique mapped guest pages across threads and forked processes;
 allocator overhead, ELF input buffers, and host sinks are separate. Guest stdin
