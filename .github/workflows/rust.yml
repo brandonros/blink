@@ -34,6 +34,7 @@ jobs:
           python3 rust/differential.py --rust-native-only
           python3 rust/float-regressions.py
           python3 rust/x87-regressions.py
+          python3 rust/packed-regressions.py
           python3 rust/tcp-smoke.py
       - uses: actions/checkout@v4
         with:
@@ -48,6 +49,12 @@ jobs:
           python3 rust/builder-smoke.py --root target/amd64-alpine --builder work/builder
           python3 rust/rootless-smoke.py --root target/amd64-alpine
           python3 rust/apk-smoke.py --root target/amd64-alpine
+      - name: Pull pinned AMD64 Node fixture using linux-oci-builder
+        run: cargo run --release --locked --manifest-path work/builder/Cargo.toml -- docker.io/library/node@sha256:025b8e975a61d94e33abeafaad1255ef44e4898cf1a1b6446860009c72e6d284 --platform linux/amd64 --output target/node-oci
+      - name: Run musl Node version gate
+        run: |
+          python3 rust/node-fixture.py --layout target/node-oci --root target/amd64-node
+          python3 rust/node-smoke.py --root target/amd64-node
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -57,6 +64,7 @@ jobs:
             target/builder-smoke/results.json
             target/rootless-smoke/results.json
             target/apk-smoke/results.json
+            target/node-smoke/results.json
       - uses: actions/upload-artifact@v4
         if: always() && runner.os == 'Linux'
         with:
@@ -71,6 +79,9 @@ jobs:
             target/x87-regressions/x87-x86_64
             target/x87-regressions/native.bin
             target/x87-regressions/results.json
+            target/packed-regressions/packed-x86_64
+            target/packed-regressions/native.bin
+            target/packed-regressions/results.json
 
   replay-amd64-on-apple-silicon:
     needs: runtime
@@ -85,7 +96,7 @@ jobs:
       - name: Replay Linux AMD64 floating-point fixture on Darwin arm64
         run: |
           uname -sm
-          for suite in float x87; do
+          for suite in float x87 packed; do
             cargo run --release --locked -p blink-cli -- target/oracle/$suite-regressions/$suite-x86_64 > target/oracle/$suite-actual.bin
             cmp target/oracle/$suite-regressions/native.bin target/oracle/$suite-actual.bin
           done

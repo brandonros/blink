@@ -173,7 +173,7 @@ The preexisting C executable, config, clean-build log and hash manifest are in
 `o/rust-reference` directory. On this Linux x86_64 host, Rust, C interpreter and
 native Linux comparisons retain per-fixture results. The expanded filesystem,
 MXCSR restart, socketpair and alternate-stack cases expose additional C baseline
-differences; consult the report rather than treating the C runtime as the oracle. All 17 fixtures pass Rust/native. C differs on vfork memory sharing and
+differences; consult the report rather than treating the C runtime as the oracle. All 18 fixtures pass Rust/native. C differs on vfork memory sharing and
 returns extra F_GETFL flags on a CLOEXEC pipe in the descriptor fixture. C JIT fails the pipe/fork
 fixture and crashes during the exec fixture, including after a clean rebuild.
 Those failures remain visible; C is a comparison target, not an infallible oracle.
@@ -259,7 +259,7 @@ children, and remain through exec. Threads share their process timer; pending
 standard signals coalesce. Wall/monotonic clock queries use host clock adapters.
 Nanosleep and absolute/relative clock_nanosleep cooperate with scheduling and
 write remaining time on interruption. Virtual/profiling CPU timers and other
-clock IDs remain unsupported. The native comparison suite now has 17 compiled
+clock IDs remain unsupported. The native comparison suite now has 18 compiled
 fixtures, including real-timer delivery, fork inheritance, and interrupted sleep.
 
 Packed conversion memory operands are checked at their architectural width: CVTDQ2PD and CVTPS2PD read eight bytes, even though the decoder reports a 16-byte vector width. Page-boundary and unmasked-exception tests guard source accesses and whole-destination preservation.
@@ -314,3 +314,30 @@ all 16 XMM registers, MXCSR validation, 16-byte alignment faults and preservatio
 of the software-owned tail. The native fixture checks restoration and fault
 behavior. The runtime records the last x87 instruction/opcode/data address;
 processor-specific pointer reporting is not compared byte-for-byte by this gate.
+
+## Node startup gate
+
+The pinned AMD64 Node 22.23.4 Alpine image prints its version and exits under the
+Rust interpreter. `node-fixture.py` extracts only that digest from a layout pulled
+by linux-oci-builder; `node-smoke.py --root ROOT` runs the version gate. The image
+manifest is `sha256:025b8e975a61d94e33abeafaad1255ef44e4898cf1a1b6446860009c72e6d284`;
+the Node executable SHA-256 is `5a92a46a1d8279fec6776e3123ca22e26a6fddbb7cf1b55e019dbb38eea8ff26`.
+This is not yet a JavaScript execution gate: the current `--jitless -p '1 + 2'`
+probe stops at epoll_create1. CLI `--max-memory BYTES` and `--max-image-size BYTES`
+expose existing runtime limits for this 130 MB executable.
+
+Startup exercises word/dword packed shifts, saturating packing, lane shuffles,
+and packed logical operations. `packed-regressions.py` compares 9,728 complete
+native register/flag records; CI also replays them on Apple Silicon. Guest capget
+supports version negotiation and guest PID queries. Its read-only model derives
+effective/permitted capabilities from guest root IDs; it never exposes host
+capabilities. Capset, securebits and file capabilities remain unsupported.
+Coarse realtime/monotonic clocks use one-millisecond guest resolution. Signal
+action flags are read as 32 bits, accepting musl's sign extension of high flags.
+
+The same pinned Node version check passes natively and with the preserved C
+interpreter when invoked through the image's musl loader and explicit library
+path. The Linux C reference was built with DISABLE_VFS, so BLINK_PREFIX does not
+root that binary; those controls are not equivalent to the Rust rooted workload.
+The C configuration/artifacts remain preserved rather than silently rebuilt with
+different features for this comparison.

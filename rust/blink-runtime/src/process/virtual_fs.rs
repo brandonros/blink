@@ -126,7 +126,8 @@ pub(super) fn lookup(
                     .map(|p| p.to_string_lossy())
                     .unwrap_or_default();
                 let c = &process.credentials;
-                format!("Name:\t{}\nState:\tR (running)\nTgid:\t{}\nPid:\t{}\nPPid:\t{}\nUid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\nThreads:\t{}\nVmSize:\t{} kB\nSigPnd:\t{:016x}\nSigBlk:\t{:016x}\n",command,process.group,process.group,process.parent,c.uid,c.euid,c.suid,c.euid,c.gid,c.egid,c.sgid,c.egid,threads,process.memory.borrow().mapped_bytes()/1024,process.signals.bits,process.signal_mask).into_bytes()
+                let (effective, permitted) = super::credentials::capabilities(c);
+                format!("Name:\t{}\nState:\tR (running)\nTgid:\t{}\nPid:\t{}\nPPid:\t{}\nUid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\nThreads:\t{}\nVmSize:\t{} kB\nSigPnd:\t{:016x}\nSigBlk:\t{:016x}\nCapInh:\t0000000000000000\nCapPrm:\t{permitted:016x}\nCapEff:\t{effective:016x}\n",command,process.group,process.group,process.parent,c.uid,c.euid,c.suid,c.euid,c.gid,c.egid,c.sgid,c.egid,threads,process.memory.borrow().mapped_bytes()/1024,process.signals.bits,process.signal_mask).into_bytes()
             }
             Some("cmdline") => nul_strings(&process.argv),
             Some("environ") => nul_strings(&process.env),

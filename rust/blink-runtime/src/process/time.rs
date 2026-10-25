@@ -125,10 +125,21 @@ pub(super) fn interval(process: &Process, nr: u64, args: [u64; 6]) -> Result<u64
     Ok(0)
 }
 pub(super) fn clock(process: &Process, nr: u64, args: [u64; 6]) -> Result<u64> {
-    if matches!(nr, 228 | 229) && !matches!(args[0], 0 | 1) {
+    if matches!(nr, 228 | 229) && !matches!(args[0], 0 | 1 | 5 | 6) {
         return Err(Error::UnsupportedSyscall(nr));
     }
-    let (seconds, nanos) = blink_host::clock(nr == 96 || nr == 201 || args[0] == 0, nr == 229);
+    let coarse = matches!(nr, 228 | 229) && matches!(args[0], 5 | 6);
+    let (seconds, mut nanos) =
+        blink_host::clock(nr == 96 || nr == 201 || matches!(args[0], 0 | 5), nr == 229);
+    let seconds = if coarse && nr == 229 {
+        nanos = 1_000_000;
+        0
+    } else {
+        if coarse {
+            nanos = nanos / 1_000_000 * 1_000_000;
+        }
+        seconds
+    };
     let mut memory = process.memory.borrow_mut();
     if nr == 201 {
         if args[0] != 0 && memory.store(args[0], seconds as u64, 8).is_err() {

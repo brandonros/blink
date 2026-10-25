@@ -1,6 +1,6 @@
 use blink::{Blink, Command, GuestArch, RuntimeConfig, Termination};
 use std::{path::PathBuf, time::Duration};
-const USAGE:&str="usage: blink-cli [--root ROOT] [--cwd DIR] [--uid UID] [--gid GID] [--env KEY=VALUE] [--rootless-metadata] [--network] [--trace] [--arch x86_64|aarch64] [--timeout-ms N] [--max-instructions N] [--] PROGRAM [ARGS...]";
+const USAGE:&str="usage: blink-cli [--root ROOT] [--cwd DIR] [--uid UID] [--gid GID] [--env KEY=VALUE] [--rootless-metadata] [--network] [--trace] [--arch x86_64|aarch64] [--timeout-ms N] [--max-instructions N] [--max-memory BYTES] [--max-image-size BYTES] [--] PROGRAM [ARGS...]";
 fn main() {
     match run() {
         Ok(code) => std::process::exit(code),
@@ -21,6 +21,8 @@ fn run() -> blink::Result<i32> {
     let mut env = Vec::new();
     let mut timeout = None;
     let mut budget = None;
+    let mut memory_limit = None;
+    let mut image_limit = None;
     let mut trace = false;
     let mut rootless_metadata = false;
     let mut network = false;
@@ -77,6 +79,22 @@ fn run() -> blink::Result<i32> {
                         .map_err(|_| usage())?,
                 ))
             }
+            Some("--max-memory") => {
+                memory_limit = Some(
+                    args.next()
+                        .ok_or_else(usage)?
+                        .parse()
+                        .map_err(|_| usage())?,
+                );
+            }
+            Some("--max-image-size") => {
+                image_limit = Some(
+                    args.next()
+                        .ok_or_else(usage)?
+                        .parse()
+                        .map_err(|_| usage())?,
+                );
+            }
             Some("--max-instructions") => {
                 budget = Some(
                     args.next()
@@ -96,6 +114,12 @@ fn run() -> blink::Result<i32> {
     config.network = network;
     if let Some(b) = budget {
         config.max_instructions = b;
+    }
+    if let Some(limit) = memory_limit {
+        config.max_memory = limit;
+    }
+    if let Some(limit) = image_limit {
+        config.max_image_size = limit;
     }
     let mut runtime = Blink::create(config)?;
     let mut command = Command::new(program);

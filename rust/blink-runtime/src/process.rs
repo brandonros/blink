@@ -1,4 +1,5 @@
 //! Cooperative guest processes. No host fork, host signals, or blocking guest pipes.
+mod credentials;
 mod internet;
 mod signals;
 mod socket;
@@ -402,6 +403,7 @@ pub(super) fn run(
                         169 => 96,
                         25 => 72,
                         160 => 63,
+                        90 => 125,
                         174 => 102,
                         175 => 107,
                         176 => 104,
@@ -526,6 +528,7 @@ pub(super) fn run(
                             0
                         }
                     }
+                    125 => credentials::capget(&process, &processes, args)?,
                     102 => process.credentials.uid as u64,
                     107 => process.credentials.euid as u64,
                     104 => process.credentials.gid as u64,
@@ -1759,7 +1762,7 @@ pub(super) fn run(
                                 } else {
                                     Some(SignalAction {
                                         handler: m.load(args[1], 8)?,
-                                        flags: m.load(args[1] + 8, 8)?,
+                                        flags: m.load(args[1] + 8, 8)? as u32 as u64,
                                         restorer: m.load(args[1] + 16, 8)?,
                                         mask: m.load(args[1] + 24, 8)?,
                                     })

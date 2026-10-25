@@ -1,6 +1,7 @@
 //! AMD64 integer interpreter with a bounded decoder adapter.
 mod decode;
 mod float;
+mod packed;
 mod signal;
 mod x87;
 use blink_core::{Cpu, Error, Memory, Result, Step};
@@ -244,7 +245,10 @@ impl Cpu for X86 {
             )?;
             return Ok(Step::Continue);
         }
-        if self.x87(m, op, a, b, pc)? || self.float(m, op, a, b, c, pc)? {
+        if self.x87(m, op, a, b, pc)?
+            || self.float(m, op, a, b, c, pc)?
+            || self.packed(m, op, a, b, c, pc)?
+        {
             return Ok(Step::Continue);
         }
         match op {
@@ -848,6 +852,17 @@ impl Cpu for X86 {
                 let sp = self.regs[4].wrapping_sub(w as u64);
                 m.store(sp, v, w)?;
                 self.regs[4] = sp;
+            }
+            Op::POPF => {
+                let width = if ins.prefixes.operand_size() { 2 } else { 8 };
+                let value = m.load(self.regs[4], width)?;
+                // Single-step and alignment-check traps are not implemented yet.
+                if value & 0x40100 != 0 {
+                    return Err(bad());
+                }
+                let allowed = 0x204cd5 & mask(width);
+                self.flags = (self.flags & !allowed) | (value & allowed) | 2;
+                self.regs[4] = self.regs[4].wrapping_add(width as u64);
             }
             Op::POP => {
                 let w = if ins.prefixes.operand_size() { 2 } else { 8 };

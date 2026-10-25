@@ -15,6 +15,10 @@ __attribute__((noreturn)) void _start(void) {
     CHECK(call(96,(long)&wall,0,0,0)==0 && wall.part>=0 && wall.part<1000000);
     long now=call(201,0,0,0,0);CHECK(now>=wall.seconds && now<=wall.seconds+1);
     CHECK(call(229,1,(long)&resolution,0,0)==0 && resolution.seconds==0 && resolution.part>0 && resolution.part<=1000000000);
+    for(int clock=5;clock<=6;clock++) {
+        CHECK(call(229,clock,(long)&resolution,0,0)==0 && resolution.seconds==0 && resolution.part>0);
+        CHECK(call(228,clock,(long)&mono,0,0)==0 && mono.seconds>0 && mono.part>=0 && mono.part<1000000000);
+    }
     CHECK(call(228,1,(long)&mono,0,0)==0);
     struct time delay={0,10000000};
     CHECK(call(35,(long)&delay,0,0,0)==0);

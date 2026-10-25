@@ -36,7 +36,7 @@ __attribute__((used,noinline,noreturn)) static void run(long *initial) {
     CHECK(call(131,1,0,0,0)==-14);
     CHECK(call(131,(long)&stack,(long)&old,0,0)==0 && old.flags==2);
     self=call(39,0,0,0,0);
-    struct {void (*handler)(int,void*,void*);unsigned long flags;void (*restore)(void);unsigned long mask;} action={handler,4|0x4000000|0x8000000,restore,0};
+    struct {void (*handler)(int,void*,void*);unsigned long flags;void (*restore)(void);unsigned long mask;} action={handler,0xffffffff00000000ul|4|0x4000000|0x8000000,restore,0};
     CHECK(call(13,10,(long)&action,0,8)==0 && call(13,12,(long)&action,0,8)==0);
     CHECK(call(62,self,10,0,0)==0 && seen==3);
     CHECK(call(131,0,(long)&old,0,0)==0 && old.flags==0 && old.pointer==stack.pointer);
