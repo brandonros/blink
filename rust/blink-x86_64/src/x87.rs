@@ -233,7 +233,7 @@ fn atan_series(mut z: Math) -> Math {
         sum
     }
 }
-fn atan2(y: Extended, x: Extended, round: Round) -> (u128, u16, bool) {
+fn atan2(y: Extended, x: Extended, round: Round, control: u16) -> (u128, u16, bool) {
     let wy: Math = y.abs().convert(&mut false).value;
     let wx: Math = x.abs().convert(&mut false).value;
     let mut angle = if y.is_zero() || (x.is_infinite() && !y.is_infinite()) {
@@ -253,12 +253,33 @@ fn atan2(y: Extended, x: Extended, round: Round) -> (u128, u16, bool) {
     if y.is_negative() {
         angle = -angle;
     }
-    transcend_result(angle, round, !angle.is_zero())
+    transcend_result(angle, round, !angle.is_zero(), control)
 }
-fn transcend_result(value: Math, round: Round, precision: bool) -> (u128, u16, bool) {
+fn transcend_result(
+    mut value: Math,
+    round: Round,
+    precision: bool,
+    control: u16,
+) -> (u128, u16, bool) {
+    let preview: rustc_apfloat::StatusAnd<Extended> = value.convert_r(round, &mut false);
+    let trap = if control & 8 == 0
+        && (preview.status.contains(Status::OVERFLOW)
+            || value.abs() >= Math::from_u128(1).value.scalbn(16384))
+    {
+        value = value.scalbn(-24576);
+        8
+    } else if control & 16 == 0
+        && !value.is_zero()
+        && value.abs() < Math::from_u128(1).value.scalbn(-16382)
+    {
+        value = value.scalbn(24576);
+        16
+    } else {
+        0
+    };
     let result: rustc_apfloat::StatusAnd<Extended> = value.convert_r(round, &mut false);
     let widened: Math = result.value.convert(&mut false).value;
-    let mut exceptions = flags(result.status);
+    let mut exceptions = flags(result.status) | trap;
     if precision {
         exceptions |= 32;
     }
@@ -281,7 +302,7 @@ fn ln2() -> Math {
         .value
         .scalbn(-128)
 }
-fn exp2_minus_one(x: Extended, round: Round) -> (u128, u16, bool) {
+fn exp2_minus_one(x: Extended, round: Round, control: u16) -> (u128, u16, bool) {
     let one = Extended::from_u128(1).value;
     if x.abs() == one {
         return (
@@ -306,7 +327,7 @@ fn exp2_minus_one(x: Extended, round: Round) -> (u128, u16, bool) {
         }
         sum = next;
     }
-    transcend_result(sum, round, true)
+    transcend_result(sum, round, true, control)
 }
 
 fn log_series(z: Math) -> Math {
@@ -463,6 +484,10 @@ impl Fpu {
         } else {
             true
         }
+    }
+    fn completed_result_exception(&mut self, bits: u16) -> bool {
+        self.exception(bits)
+            || (self.status & !self.control & 24 != 0 && self.status & !self.control & 7 == 0)
     }
     fn get(&self, index: usize, exceptions: &mut u16) -> u128 {
         let slot = (self.top + index) & 7;
@@ -1081,16 +1106,20 @@ impl X86 {
                     let (sin, cos) = sin_cos(value);
                     let precision = !value.is_zero();
                     let (sin_bits, sin_flags, sin_up) =
-                        transcend_result(sin, self.fpu.round(), precision);
+                        transcend_result(sin, self.fpu.round(), precision, self.fpu.control);
                     let (cos_bits, cos_flags, cos_up) =
-                        transcend_result(cos, self.fpu.round(), precision);
+                        transcend_result(cos, self.fpu.round(), precision, self.fpu.control);
                     match op {
                         Op::FSIN => (sin_bits, 0, sin_flags, sin_up),
                         Op::FCOS => (cos_bits, 0, cos_flags, cos_up),
                         Op::FSINCOS => (cos_bits, sin_bits, sin_flags | cos_flags, cos_up),
                         _ => {
-                            let (tan_bits, flags, up) =
-                                transcend_result((sin / cos).value, self.fpu.round(), precision);
+                            let (tan_bits, flags, up) = transcend_result(
+                                (sin / cos).value,
+                                self.fpu.round(),
+                                precision,
+                                self.fpu.control,
+                            );
                             (Extended::from_u128(1).value.to_bits(), tan_bits, flags, up)
                         }
                     }
@@ -1110,7 +1139,7 @@ impl X86 {
                     first = INDEFINITE;
                     second = INDEFINITE;
                 }
-                if self.fpu.exception(exceptions) {
+                if self.fpu.completed_result_exception(exceptions) {
                     if push {
                         self.fpu.set(0, second);
                         self.fpu.top = next;
@@ -1198,7 +1227,12 @@ impl X86 {
                         )
                     } else {
                         let value = (wy * log).value;
-                        transcend_result(value, self.fpu.round(), !y.is_zero() && !zero_log)
+                        transcend_result(
+                            value,
+                            self.fpu.round(),
+                            !y.is_zero() && !zero_log,
+                            self.fpu.control,
+                        )
                     }
                 };
                 exceptions |= raised;
@@ -1209,7 +1243,7 @@ impl X86 {
                 if up {
                     self.fpu.status |= 0x200;
                 }
-                if self.fpu.exception(exceptions) {
+                if self.fpu.completed_result_exception(exceptions) {
                     self.fpu.set(1, bits);
                     self.fpu.pop();
                 }
@@ -1237,7 +1271,7 @@ impl X86 {
                 } else if value.abs() > Extended::from_u128(1).value {
                     return Err(bad());
                 } else {
-                    exp2_minus_one(value, self.fpu.round())
+                    exp2_minus_one(value, self.fpu.round(), self.fpu.control)
                 };
                 exceptions |= raised;
                 if exceptions & 5 != 0 {
@@ -1247,7 +1281,7 @@ impl X86 {
                 if up {
                     self.fpu.status |= 0x200;
                 }
-                if self.fpu.exception(exceptions) {
+                if self.fpu.completed_result_exception(exceptions) {
                     self.fpu.set(0, result);
                 }
             }
@@ -1289,7 +1323,7 @@ impl X86 {
                         false,
                     )
                 } else {
-                    atan2(y, x, self.fpu.round())
+                    atan2(y, x, self.fpu.round(), self.fpu.control)
                 };
                 exceptions |= raised;
                 if exceptions & 5 != 0 {
@@ -1299,7 +1333,7 @@ impl X86 {
                 if up {
                     self.fpu.status |= 0x200;
                 }
-                if self.fpu.exception(exceptions) {
+                if self.fpu.completed_result_exception(exceptions) {
                     self.fpu.set(1, bits);
                     self.fpu.pop();
                 }
@@ -2047,6 +2081,29 @@ mod tests {
             cpu.x87(&mut memory, op, None, None, 0x1000).unwrap();
             assert_eq!(cpu.fpu.get(0, &mut 0), x.to_bits());
             assert_eq!(cpu.fpu.status() & 0x8081, 0x8081);
+        }
+    }
+    #[test]
+    fn unmasked_transcendental_underflow_commits_both_stack_outputs() {
+        for op in [Op::FSINCOS, Op::FPTAN] {
+            let (mut cpu, mut memory) = machine(&[0x90]);
+            cpu.fpu.set(0, 1); // smallest subnormal
+            cpu.fpu.control &= !16;
+            cpu.x87(&mut memory, op, None, None, 0x1000).unwrap();
+            assert_eq!(cpu.fpu.top, 7);
+            assert_eq!(
+                cpu.fpu.get(0, &mut 0),
+                Extended::from_u128(1).value.to_bits()
+            );
+            assert_eq!(
+                cpu.fpu.get(1, &mut 0),
+                Extended::from_u128(1).value.scalbn(8131).to_bits()
+            );
+            assert_eq!(cpu.fpu.status() & 0x80bf, 0x80b2);
+            assert!(matches!(
+                cpu.x87(&mut memory, Op::WAIT, None, None, 0x1000),
+                Err(Error::ArithmeticFault)
+            ));
         }
     }
     #[test]

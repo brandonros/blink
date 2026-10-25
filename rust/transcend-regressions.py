@@ -61,7 +61,9 @@ for index in range(len(native)//40):
     # Permit only that flag at this exact boundary, and retain it in the report.
     tiny_atan = operation == 0 and x == 1 and y is not None and abs(y) == mp.power(2, -16382)
     tiny_sine = operation in (4, 7, 8) and x is not None and abs(x) == mp.power(2, -16382)
-    if status_difference == 0x10 and (tiny_atan or tiny_sine):
+    control = struct.unpack('<H', a[32:34])[0]
+    boundary_status_mask = 0x10 if control & 16 else 0x8090
+    if status_difference & 0x10 and not status_difference & ~boundary_status_mask and (tiny_atan or tiny_sine):
         underflow_boundary_differences.append(dict(record=index, native=hex(native_sw), rust=hex(rust_sw)))
     elif status_difference:
         errors.append(dict(record=index, reason='status', native=hex(native_sw), rust=hex(rust_sw)))
@@ -88,7 +90,7 @@ for index in range(len(native)//40):
                  else y*mp.log(x, 2) if operation == 2 else y*mp.log1p(x)/mp.ln(2))
     if not reference and a[20:30] != b[20:30]:
         errors.append(dict(record=index, reason='exact zero'))
-    if abs(reference) > largest_extended:
+    if abs(reference) > largest_extended and control & 8:
         if a[20:30] != b[20:30]:
             errors.append(dict(record=index, reason='overflow result'))
         continue
@@ -96,6 +98,14 @@ for index in range(len(native)//40):
         last_bit_differences += 1
     for engine, data in [('native', a), ('rust', b)]:
         actual = decode(data[20:30])
+        sw = struct.unpack('<H', data[30:32])[0]
+        # Trap results carry a single exponent adjustment. Undo it before
+        # checking the mathematical value; cosine/constant stack outputs do not.
+        if actual is not None and operation not in (7, 9):
+            if sw & 8 and not control & 8:
+                actual *= mp.power(2, 24576)
+            elif sw & 16 and not control & 16:
+                actual *= mp.power(2, -24576)
         if actual is None:
             errors.append(dict(record=index, reason=engine+' nonfinite result'))
             continue
@@ -114,7 +124,8 @@ for index in range(len(native)//40):
             continue
         # One extended-precision ulp at the exact result, with subnormal spacing.
         exponent = int(mp.floor(mp.log(abs(reference), 2))) if reference else -16382
-        ulp = mp.power(2, max(exponent, -16382)-63)
+        minimum_exponent = -40958 if sw & 16 and not control & 16 else -16382
+        ulp = mp.power(2, max(exponent, minimum_exponent)-63)
         error = abs(actual-reference)/ulp
         max_error[engine] = max(max_error[engine], error)
         # Directed rounding adds up to one ulp to the approximation error;
