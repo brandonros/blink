@@ -64,7 +64,7 @@ impl Permissions {
 const PAGE: u64 = 4096;
 #[derive(Clone)]
 struct Page {
-    bytes: Box<[u8; 4096]>,
+    bytes: Option<Box<[u8; 4096]>>,
     permissions: Permissions,
     bus_fault: bool,
     inherit_on_fork: bool,
@@ -75,15 +75,25 @@ struct Page {
 pub struct Memory {
     pages: BTreeMap<u64, Page>,
     max_pages: usize,
+    max_virtual_pages: usize,
+    backed_pages: usize,
     next_mapping: u64,
 }
 impl Memory {
     pub fn new(max_bytes: usize) -> Self {
+        Self::with_limits(max_bytes, max_bytes)
+    }
+    pub fn with_limits(max_bytes: usize, max_virtual_bytes: usize) -> Self {
         Self {
             pages: BTreeMap::new(),
             max_pages: max_bytes / 4096,
+            max_virtual_pages: max_virtual_bytes / 4096,
+            backed_pages: 0,
             next_mapping: 1,
         }
+    }
+    pub fn backed_bytes(&self) -> usize {
+        self.backed_pages * 4096
     }
     pub fn mapped_bytes(&self) -> usize {
         self.pages.len() * 4096
@@ -111,7 +121,10 @@ impl Memory {
             .checked_sub(first)
             .and_then(|v| v.checked_add(1))
             .ok_or(Error::ResourceLimit)?;
-        if count > self.max_pages as u64 || self.pages.len() as u64 + count > self.max_pages as u64
+        let backed = !anonymous || permissions.read || permissions.write || permissions.execute;
+        if count > self.max_virtual_pages as u64
+            || self.pages.len() as u64 + count > self.max_virtual_pages as u64
+            || backed && self.backed_pages as u64 + count > self.max_pages as u64
         {
             return Err(Error::ResourceLimit);
         }
@@ -122,7 +135,7 @@ impl Memory {
             self.pages.insert(
                 p,
                 Page {
-                    bytes: Box::new([0; 4096]),
+                    bytes: backed.then(|| Box::new([0; 4096])),
                     permissions,
                     bus_fault: false,
                     inherit_on_fork: true,
@@ -130,6 +143,9 @@ impl Memory {
                     mapping: self.next_mapping,
                 },
             );
+        }
+        if backed {
+            self.backed_pages += count as usize;
         }
         self.next_mapping += 1;
         Ok(())
@@ -145,8 +161,17 @@ impl Memory {
                 .map(|(address, page)| (*address, page.clone()))
                 .collect(),
             max_pages: self.max_pages,
+            max_virtual_pages: self.max_virtual_pages,
+            backed_pages: self.fork_backed_bytes() / 4096,
             next_mapping: self.next_mapping,
         }
+    }
+    pub fn fork_backed_bytes(&self) -> usize {
+        self.pages
+            .values()
+            .filter(|page| page.inherit_on_fork && page.bytes.is_some())
+            .count()
+            * 4096
     }
     pub fn fork_bytes(&self) -> usize {
         self.pages
@@ -173,6 +198,38 @@ impl Memory {
             page.inherit_on_fork = inherit;
         }
         Ok(())
+    }
+    /// Discard private anonymous contents without changing access or fork advice.
+    /// File-backed reloads require mapping provenance and are not implemented.
+    pub fn discard_anonymous(&mut self, address: u64, size: u64) -> Result<bool> {
+        let end = address.checked_add(size).ok_or(Error::ResourceLimit)?;
+        if address % PAGE != 0 || size % PAGE != 0 {
+            return Err(Error::InvalidConfig("unaligned discard".into()));
+        }
+        if self.mapped_in_range(address, size) as u64 != size {
+            return Err(Error::MemoryFault {
+                address,
+                access: Access::Read,
+            });
+        }
+        if self
+            .pages
+            .range(address / PAGE..end / PAGE)
+            .any(|(_, page)| !page.anonymous)
+        {
+            return Ok(false);
+        }
+        for (_, page) in self.pages.range_mut(address / PAGE..end / PAGE) {
+            if page.permissions.read || page.permissions.write || page.permissions.execute {
+                page.bytes
+                    .as_mut()
+                    .expect("accessible page backing")
+                    .fill(0);
+            } else if page.bytes.take().is_some() {
+                self.backed_pages -= 1;
+            }
+        }
+        Ok(true)
     }
     /// Validate that a remap range stays within one mapping with uniform state.
     /// Returns whether extension with zero-filled pages is valid.
@@ -215,6 +272,21 @@ impl Memory {
             }
         }
     }
+    pub fn remap_backed_bytes(&self, old: u64, old_size: u64, new_size: u64) -> Result<usize> {
+        self.remap_source(old, old_size)?;
+        let template = &self.pages[&(old / PAGE)];
+        let backed = !template.anonymous
+            || template.permissions.read
+            || template.permissions.write
+            || template.permissions.execute;
+        let kept = self.backed_in_range(old, old_size.min(new_size));
+        kept.checked_add(if backed {
+            new_size.saturating_sub(old_size) as usize
+        } else {
+            0
+        })
+        .ok_or(Error::ResourceLimit)
+    }
     /// Move existing owned pages; additions inherit mapping permissions/advice.
     /// The caller validates destination replacement and aggregate process limits.
     pub fn remap(&mut self, old: u64, old_size: u64, new: u64, new_size: u64) -> Result<()> {
@@ -244,7 +316,22 @@ impl Memory {
             .mapped_bytes()
             .checked_sub(removed)
             .and_then(|size| size.checked_add(new_size as usize))
-            .is_none_or(|size| size > self.max_pages * 4096)
+            .is_none_or(|size| size > self.max_virtual_pages * 4096)
+        {
+            return Err(Error::ResourceLimit);
+        }
+        let removed_backing = self.backed_in_range(old, old_size)
+            + if new != old {
+                self.backed_in_range(new, new_size)
+            } else {
+                0
+            };
+        let new_backing = self.remap_backed_bytes(old, old_size, new_size)?;
+        if self
+            .backed_bytes()
+            .checked_sub(removed_backing)
+            .and_then(|n| n.checked_add(new_backing))
+            .is_none_or(|n| n > self.max_pages * 4096)
         {
             return Err(Error::ResourceLimit);
         }
@@ -252,7 +339,9 @@ impl Memory {
         let kept = old_size.min(new_size) / PAGE;
         let mut pages = Vec::with_capacity((new_size / PAGE) as usize);
         for n in 0..kept {
-            pages.push(self.pages.remove(&(old / PAGE + n)).unwrap());
+            let page = self.pages.remove(&(old / PAGE + n)).unwrap();
+            self.backed_pages -= usize::from(page.bytes.is_some());
+            pages.push(page);
         }
         self.unmap(old, old_size)?;
         self.unmap(new, new_size)?;
@@ -262,7 +351,11 @@ impl Memory {
                 pages.next().unwrap()
             } else {
                 Page {
-                    bytes: Box::new([0; 4096]),
+                    bytes: (!template.anonymous
+                        || template.permissions.read
+                        || template.permissions.write
+                        || template.permissions.execute)
+                        .then(|| Box::new([0; 4096])),
                     permissions: template.permissions,
                     bus_fault: false,
                     inherit_on_fork: template.inherit_on_fork,
@@ -270,9 +363,21 @@ impl Memory {
                     mapping: template.mapping,
                 }
             };
+            self.backed_pages += usize::from(page.bytes.is_some());
             self.pages.insert(new / PAGE + n, page);
         }
         Ok(())
+    }
+    pub fn backed_in_range(&self, address: u64, size: u64) -> usize {
+        if size == 0 {
+            return 0;
+        }
+        let end = address.saturating_add(size - 1);
+        self.pages
+            .range(address / PAGE..=end / PAGE)
+            .filter(|(_, page)| page.bytes.is_some())
+            .count()
+            * 4096
     }
     pub fn mapped_in_range(&self, address: u64, size: u64) -> usize {
         if size == 0 {
@@ -295,31 +400,66 @@ impl Memory {
             return Err(Error::InvalidConfig("unaligned/empty unmap".into()));
         }
         let end = address.checked_add(size - 1).ok_or(Error::ResourceLimit)?;
+        self.backed_pages -= self.backed_in_range(address, size) / 4096;
         self.pages
             .retain(|page, _| *page < address / PAGE || *page > end / PAGE);
         Ok(())
     }
-    pub fn protect(&mut self, address: u64, size: u64, permissions: Permissions) -> Result<()> {
+    pub fn protection_growth(
+        &self,
+        address: u64,
+        size: u64,
+        permissions: Permissions,
+    ) -> Result<usize> {
         if address % PAGE != 0 {
             return Err(Error::InvalidConfig("unaligned protect".into()));
         }
         if size == 0 {
-            return Ok(());
+            return Ok(0);
         }
         let end = address.checked_add(size - 1).ok_or(Error::ResourceLimit)?;
         let first = address / PAGE;
         let last = end / PAGE;
-        if last - first >= self.max_pages as u64
-            || (first..=last).any(|p| !self.pages.contains_key(&p))
+        if last - first >= self.max_virtual_pages as u64
+            || (first..=last).any(|page| !self.pages.contains_key(&page))
         {
             return Err(Error::MemoryFault {
                 address,
                 access: Access::Write,
             });
         }
-        for p in first..=last {
-            self.pages.get_mut(&p).unwrap().permissions = permissions;
+        if !(permissions.read || permissions.write || permissions.execute) {
+            return Ok(0);
         }
+        Ok(self
+            .pages
+            .range(first..=last)
+            .filter(|(_, page)| page.bytes.is_none())
+            .count()
+            * 4096)
+    }
+    pub fn protect(&mut self, address: u64, size: u64, permissions: Permissions) -> Result<()> {
+        let growth = self.protection_growth(address, size, permissions)?;
+        if self
+            .backed_bytes()
+            .checked_add(growth)
+            .is_none_or(|n| n > self.max_pages * 4096)
+        {
+            return Err(Error::ResourceLimit);
+        }
+        if size == 0 {
+            return Ok(());
+        }
+        let last = (address + size - 1) / PAGE;
+        for (_, page) in self.pages.range_mut(address / PAGE..=last) {
+            if page.bytes.is_none()
+                && (permissions.read || permissions.write || permissions.execute)
+            {
+                page.bytes = Some(Box::new([0; 4096]));
+            }
+            page.permissions = permissions;
+        }
+        self.backed_pages += growth / 4096;
         Ok(())
     }
     pub fn check(&self, address: u64, len: usize, access: Access) -> Result<()> {
@@ -353,8 +493,9 @@ impl Memory {
             let at = address + copied as u64;
             let offset = (at % PAGE) as usize;
             let count = (4096 - offset).min(dst.len() - copied);
-            dst[copied..copied + count]
-                .copy_from_slice(&self.pages[&(at / PAGE)].bytes[offset..offset + count]);
+            dst[copied..copied + count].copy_from_slice(
+                &self.pages[&(at / PAGE)].bytes.as_ref().unwrap()[offset..offset + count],
+            );
             copied += count;
         }
         Ok(())
@@ -376,12 +517,29 @@ impl Memory {
                 });
             }
         }
+        let added = if src.is_empty() {
+            0
+        } else {
+            let last = (address + src.len() as u64 - 1) / PAGE;
+            self.pages
+                .range(address / PAGE..=last)
+                .filter(|(_, page)| page.bytes.is_none())
+                .count()
+        };
+        if self.backed_pages + added > self.max_pages {
+            return Err(Error::ResourceLimit);
+        }
+        self.backed_pages += added;
         let mut copied = 0;
         while copied < src.len() {
             let at = address + copied as u64;
             let offset = (at % PAGE) as usize;
             let count = (4096 - offset).min(src.len() - copied);
-            self.pages.get_mut(&(at / PAGE)).unwrap().bytes[offset..offset + count]
+            self.pages
+                .get_mut(&(at / PAGE))
+                .unwrap()
+                .bytes
+                .get_or_insert_with(|| Box::new([0; 4096]))[offset..offset + count]
                 .copy_from_slice(&src[copied..copied + count]);
             copied += count;
         }
@@ -401,7 +559,7 @@ impl Memory {
         if page.bus_fault {
             return Err(Error::BusFault { address });
         }
-        Ok(&page.bytes[(address % PAGE) as usize..])
+        Ok(&page.bytes.as_ref().unwrap()[(address % PAGE) as usize..])
     }
     pub fn fetch(&self, address: u64) -> Result<u8> {
         Ok(self.instruction_page(address)?[0])
@@ -448,6 +606,38 @@ mod tests {
         output.fill(0xa5);
         assert!(memory.read(4097, &mut output, Access::Read).is_err());
         assert!(output.iter().all(|byte| *byte == 0xa5));
+    }
+    #[test]
+    fn reservations_charge_backing_only_when_access_is_enabled() {
+        let mut memory = Memory::with_limits(8192, 2 * 1024 * 1024);
+        let none = Permissions {
+            read: false,
+            write: false,
+            execute: false,
+        };
+        memory.map_anonymous(0x1000, 1024 * 1024, none).unwrap();
+        assert_eq!(memory.mapped_bytes(), 1024 * 1024);
+        assert_eq!(memory.backed_bytes(), 0);
+        memory.protect(0x1000, 4096, Permissions::RW).unwrap();
+        memory.store(0x1000, 42, 8).unwrap();
+        memory.protect(0x1000, 4096, none).unwrap();
+        assert_eq!(memory.backed_bytes(), 4096);
+        assert!(memory.protect(0x2000, 8192, Permissions::RW).is_err());
+        assert!(memory.load(0x2000, 1).is_err());
+        assert_eq!(memory.backed_bytes(), 4096);
+        memory.protect(0x2000, 4096, Permissions::RW).unwrap();
+        memory.protect(0x1000, 4096, Permissions::RW).unwrap();
+        assert_eq!(memory.load(0x1000, 8).unwrap(), 42);
+        memory.set_fork_inheritance(0x1000, 4096, false).unwrap();
+        let child = memory.fork_copy();
+        assert_eq!(child.backed_bytes(), 4096);
+        assert_eq!(child.mapped_bytes(), 1024 * 1024 - 4096);
+        memory.remap(0x3000, 4096, 0x400000, 8192).unwrap();
+        assert_eq!(memory.backed_bytes(), 8192);
+        assert_eq!(memory.mapped_bytes(), 1024 * 1024 + 4096);
+        memory.unmap(0x1000, 1024 * 1024).unwrap();
+        assert_eq!(memory.backed_bytes(), 0);
+        assert_eq!(memory.mapped_bytes(), 8192);
     }
     #[test]
     fn cross_page_write_is_atomic() {

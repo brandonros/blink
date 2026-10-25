@@ -1,6 +1,6 @@
 use blink::{Blink, Command, GuestArch, RuntimeConfig, Termination};
 use std::{path::PathBuf, time::Duration};
-const USAGE:&str="usage: blink-cli [--root ROOT] [--cwd DIR] [--uid UID] [--gid GID] [--env KEY=VALUE] [--rootless-metadata] [--network] [--trace] [--arch x86_64|aarch64] [--timeout-ms N] [--max-instructions N] [--max-memory BYTES] [--max-image-size BYTES] [--] PROGRAM [ARGS...]";
+const USAGE:&str="usage: blink-cli [--root ROOT] [--cwd DIR] [--uid UID] [--gid GID] [--env KEY=VALUE] [--rootless-metadata] [--network] [--trace] [--arch x86_64|aarch64] [--timeout-ms N] [--max-instructions N] [--max-memory BYTES] [--max-virtual-memory BYTES] [--max-image-size BYTES] [--] PROGRAM [ARGS...]";
 fn main() {
     match run() {
         Ok(code) => std::process::exit(code),
@@ -22,6 +22,7 @@ fn run() -> blink::Result<i32> {
     let mut timeout = None;
     let mut budget = None;
     let mut memory_limit = None;
+    let mut virtual_limit = None;
     let mut image_limit = None;
     let mut trace = false;
     let mut rootless_metadata = false;
@@ -87,6 +88,14 @@ fn run() -> blink::Result<i32> {
                         .map_err(|_| usage())?,
                 );
             }
+            Some("--max-virtual-memory") => {
+                virtual_limit = Some(
+                    args.next()
+                        .ok_or_else(usage)?
+                        .parse()
+                        .map_err(|_| usage())?,
+                );
+            }
             Some("--max-image-size") => {
                 image_limit = Some(
                     args.next()
@@ -117,6 +126,9 @@ fn run() -> blink::Result<i32> {
     }
     if let Some(limit) = memory_limit {
         config.max_memory = limit;
+    }
+    if let Some(limit) = virtual_limit {
+        config.max_virtual_memory = limit;
     }
     if let Some(limit) = image_limit {
         config.max_image_size = limit;

@@ -27,5 +27,18 @@ __attribute__((noreturn)) void _start(void) {
     CHECK(C(10,base,4096,3,0)==0 && *(volatile long*)base==41);
     CHECK(C(11,base,8192,0,0)==0);
     CHECK(C(28,base,4096,10,0)==-12 && C(28,base,0,10,0)==0);
+    /* Reserve far more virtual space than the interpreter's backing budget. */
+    long reserve=call(9,0,512L*1024*1024,0,0x22,-1,0);CHECK(reserve>0);
+    CHECK(C(10,reserve,4096,3,0)==0);
+    *(volatile long*)reserve=123;
+    CHECK(C(10,reserve,4096,0,0)==0 && C(10,reserve,4096,3,0)==0);
+    CHECK(*(volatile long*)reserve==123);
+    CHECK(C(28,reserve,1,4,0)==0 && *(volatile long*)reserve==0);
+    *(volatile long*)reserve=456;
+    CHECK(C(10,reserve,4096,0,0)==0 && C(28,reserve,4096,4,0)==0);
+    CHECK(C(10,reserve,4096,3,0)==0 && *(volatile long*)reserve==0);
+    CHECK(C(28,reserve+1,4096,4,0)==-22);
+    CHECK(C(11,reserve,512L*1024*1024,0,0)==0);
+    CHECK(C(28,reserve,4096,4,0)==-12);
     C(231,0,0,0,0);__builtin_unreachable();
 }

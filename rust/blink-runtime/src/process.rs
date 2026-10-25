@@ -188,7 +188,7 @@ fn image(
             &bytes,
             interp.as_deref(),
             config.guest_arch,
-            config.max_memory,
+            (config.max_memory, config.max_virtual_memory),
             &args,
             env,
             credentials,
@@ -1717,7 +1717,8 @@ pub(super) fn run(
                             0
                         } else {
                             let limit = match args[1] {
-                                2 | 9 => config.max_memory as u64,
+                                2 => config.max_memory as u64,
+                                9 => config.max_virtual_memory as u64,
                                 3 => 1024 * 1024,
                                 4 | 8 | 12 | 13 | 14 => 0,
                                 6 | 7 | 11 => 1024,
@@ -1779,6 +1780,11 @@ pub(super) fn run(
                                 if total
                                     .checked_add((new - old) as usize)
                                     .is_none_or(|n| n > config.max_memory)
+                                    || virtual_usage(
+                                        processes.values().chain(std::iter::once(&process)),
+                                    )
+                                    .checked_add((new - old) as usize)
+                                    .is_none_or(|n| n > config.max_virtual_memory)
                                 {
                                     false
                                 } else {
@@ -1826,6 +1832,15 @@ pub(super) fn run(
                         } else {
                             let size = args[1].div_ceil(4096) * 4096;
                             match args[2] {
+                                4 => match process
+                                    .memory
+                                    .borrow_mut()
+                                    .discard_anonymous(args[0], size)
+                                {
+                                    Ok(true) => 0,
+                                    Ok(false) => return Err(Error::UnsupportedSyscall(number)),
+                                    Err(_) => errno(12),
+                                },
                                 10 | 11 => {
                                     if process
                                         .memory
@@ -1863,15 +1878,33 @@ pub(super) fn run(
                             let result = if nr == 11 {
                                 process.memory.borrow_mut().unmap(args[0], args[1])
                             } else {
-                                process.memory.borrow_mut().protect(
+                                let permissions = Permissions {
+                                    read: args[2] & 1 != 0,
+                                    write: args[2] & 2 != 0,
+                                    execute: args[2] & 4 != 0,
+                                };
+                                let growth = process.memory.borrow().protection_growth(
                                     args[0],
                                     args[1],
-                                    Permissions {
-                                        read: args[2] & 1 != 0,
-                                        write: args[2] & 2 != 0,
-                                        execute: args[2] & 4 != 0,
-                                    },
-                                )
+                                    permissions,
+                                );
+                                match growth {
+                                    Ok(growth)
+                                        if memory_usage(
+                                            processes.values().chain(std::iter::once(&process)),
+                                        )
+                                        .checked_add(growth)
+                                        .is_some_and(|n| n <= config.max_memory) =>
+                                    {
+                                        process.memory.borrow_mut().protect(
+                                            args[0],
+                                            args[1],
+                                            permissions,
+                                        )
+                                    }
+                                    Ok(_) => Err(Error::ResourceLimit),
+                                    Err(error) => Err(error),
+                                }
                             };
                             if result.is_ok() {
                                 0
@@ -2476,8 +2509,15 @@ pub(super) fn run(
                             || (!thread
                                 && !vfork
                                 && total
-                                    .checked_add(process.memory.borrow().fork_bytes())
+                                    .checked_add(process.memory.borrow().fork_backed_bytes())
                                     .is_none_or(|n| n > config.max_memory))
+                            || (!thread
+                                && !vfork
+                                && virtual_usage(
+                                    processes.values().chain(std::iter::once(&process)),
+                                )
+                                .checked_add(process.memory.borrow().fork_bytes())
+                                .is_none_or(|n| n > config.max_virtual_memory))
                         {
                             errno(11)
                         } else {
@@ -2704,8 +2744,11 @@ pub(super) fn run(
                                     Ok(new) => {
                                         let other = memory_usage(processes.values());
                                         if other
-                                            .checked_add(new.memory.mapped_bytes())
+                                            .checked_add(new.memory.backed_bytes())
                                             .is_none_or(|n| n > config.max_memory)
+                                            || virtual_usage(processes.values())
+                                                .checked_add(new.memory.mapped_bytes())
+                                                .is_none_or(|n| n > config.max_virtual_memory)
                                         {
                                             errno(12)
                                         } else {
@@ -3208,7 +3251,16 @@ fn memory_usage<'a>(processes: impl Iterator<Item = &'a Process>) -> usize {
     for p in processes {
         spaces
             .entry(Rc::as_ptr(&p.memory))
-            .or_insert_with(|| p.memory.borrow().mapped_bytes());
+            .or_insert_with(|| p.memory.borrow().backed_bytes());
+    }
+    spaces.values().sum()
+}
+fn virtual_usage<'a>(processes: impl Iterator<Item = &'a Process>) -> usize {
+    let mut spaces = BTreeMap::new();
+    for process in processes {
+        spaces
+            .entry(Rc::as_ptr(&process.memory))
+            .or_insert_with(|| process.memory.borrow().mapped_bytes());
     }
     spaces.values().sum()
 }
@@ -3508,13 +3560,28 @@ fn remap_memory(
     } else {
         memory.mapped_in_range(new, new_size)
     };
+    let old_backed = memory.backed_in_range(old, old_size);
+    let replaced_backed = if new == old {
+        0
+    } else {
+        memory.backed_in_range(new, new_size)
+    };
+    let new_backed = memory.remap_backed_bytes(old, old_size, new_size)?;
     drop(memory);
     let total = memory_usage(processes.values().chain(std::iter::once(process)));
     if total
+        .checked_sub(old_backed)
+        .and_then(|n| n.checked_sub(replaced_backed))
+        .and_then(|n| n.checked_add(new_backed))
+        .is_none_or(|n| n > config.max_memory)
+    {
+        return Ok(errno(12));
+    }
+    if virtual_usage(processes.values().chain(std::iter::once(process)))
         .checked_sub(old_size as usize)
         .and_then(|size| size.checked_sub(replaced))
         .and_then(|size| size.checked_add(new_size as usize))
-        .is_none_or(|size| size > config.max_memory)
+        .is_none_or(|size| size > config.max_virtual_memory)
     {
         return Ok(errno(12));
     }
@@ -3555,7 +3622,7 @@ fn map_memory(
     {
         return Ok(errno(22));
     }
-    if args[1] > config.max_memory as u64 {
+    if args[1] > config.max_virtual_memory as u64 {
         return Ok(errno(12));
     }
     let Some(size) = args[1].checked_add(4095).map(|size| size & !4095) else {
@@ -3583,11 +3650,21 @@ fn map_memory(
     if replaced != 0 && (!fixed || exclusive) {
         return Ok(errno(if exclusive { 17 } else { 12 }));
     }
+    let replaced_backed = process.memory.borrow().backed_in_range(address, size);
+    let backed = if anonymous && args[2] == 0 {
+        0
+    } else {
+        size as usize
+    };
     let total = memory_usage(processes.values().chain(std::iter::once(process)));
     if total
-        .checked_sub(replaced)
-        .and_then(|n| n.checked_add(size as usize))
+        .checked_sub(replaced_backed)
+        .and_then(|n| n.checked_add(backed))
         .is_none_or(|n| n > config.max_memory)
+        || virtual_usage(processes.values().chain(std::iter::once(process)))
+            .checked_sub(replaced)
+            .and_then(|n| n.checked_add(size as usize))
+            .is_none_or(|n| n > config.max_virtual_memory)
     {
         return Ok(errno(12));
     }

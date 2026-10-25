@@ -551,3 +551,26 @@ fn output_backpressure_respects_nonblocking_and_cancellation() {
     thread.join().unwrap();
     capture(&mut runtime, "good").0.ensure_success().unwrap();
 }
+
+#[test]
+fn fork_virtual_reservations_count_toward_process_tree_budget() {
+    let root = Root::new();
+    // mmap(NULL, 5 MiB, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    // fork(); exit(-result). Parent exits 11 on EAGAIN, 254 on child PID 2.
+    let code = [
+        0x31, 0xff, 0xbe, 0, 0, 0x50, 0, 0x31, 0xd2, 0x41, 0xba, 0x22, 0, 0, 0, 0x49, 0xc7, 0xc0,
+        0xff, 0xff, 0xff, 0xff, 0x45, 0x31, 0xc9, 0xb8, 9, 0, 0, 0, 0x0f, 5, 0xb8, 57, 0, 0, 0,
+        0x0f, 5, 0xf7, 0xd8, 0x89, 0xc7, 0xb8, 60, 0, 0, 0, 0x0f, 5,
+    ];
+    root.write("reserve-fork", &elf(GuestArch::X86_64, &code));
+    for (virtual_mib, exit) in [(8, 11), (16, 254)] {
+        let mut config = RuntimeConfig::new(&root.0, GuestArch::X86_64);
+        config.max_memory = 8 * 1024 * 1024;
+        config.max_virtual_memory = virtual_mib * 1024 * 1024;
+        let mut runtime = Blink::create(config).unwrap();
+        assert_eq!(
+            capture(&mut runtime, "reserve-fork").0.termination,
+            Termination::Exited(exit)
+        );
+    }
+}

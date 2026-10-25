@@ -164,12 +164,12 @@ pub fn load(
     bytes: &[u8],
     interpreter_bytes: Option<&[u8]>,
     arch: GuestArch,
-    max_memory: usize,
+    memory_limits: (usize, usize),
     args: &[String],
     env: &[String],
     credentials: &blink_linux::Credentials,
 ) -> Result<Image> {
-    let mut memory = Memory::new(max_memory);
+    let mut memory = Memory::with_limits(memory_limits.0, memory_limits.1);
     let main = segments(bytes, arch, 0x400000000, &mut memory)?;
     let (entry, interp_base) = if let Some(interp) = interpreter_bytes {
         if interpreter(interp)?.is_some() {
@@ -298,7 +298,7 @@ mod tests {
             &main,
             Some(&interpreter),
             GuestArch::X86_64,
-            4 * 1024 * 1024,
+            (4 * 1024 * 1024, 4 * 1024 * 1024),
             &["/main".into()],
             &[],
             &credentials,

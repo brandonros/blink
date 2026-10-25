@@ -17,7 +17,10 @@ use std::{
 pub struct RuntimeConfig {
     pub rootfs: PathBuf,
     pub guest_arch: GuestArch,
+    /// Aggregate storage-backed guest pages across the process tree.
     pub max_memory: usize,
+    /// Aggregate mapped address space, including inaccessible reservations.
+    pub max_virtual_memory: usize,
     pub max_image_size: usize,
     pub max_instructions: u64,
     pub trace: bool,
@@ -32,6 +35,7 @@ impl RuntimeConfig {
             rootfs: rootfs.into(),
             guest_arch,
             max_memory: 64 * 1024 * 1024,
+            max_virtual_memory: 4 * 1024 * 1024 * 1024,
             max_image_size: 32 * 1024 * 1024,
             max_instructions: 100_000_000,
             trace: false,
@@ -173,6 +177,8 @@ impl Runtime {
         config.rootfs = fs::canonicalize(&config.rootfs)?;
         if !config.rootfs.is_dir()
             || config.max_memory < 2 * 1024 * 1024
+            || config.max_virtual_memory < config.max_memory
+            || config.max_virtual_memory as u64 > 0x800000000000
             || config.max_image_size == 0
             || config.max_image_size == usize::MAX
             || config.max_instructions == 0

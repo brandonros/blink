@@ -319,14 +319,14 @@ processor-specific pointer reporting is not compared byte-for-byte by this gate.
 
 The pinned AMD64 Node 22.23.4 Alpine image prints its version and exits under the
 Rust interpreter. `node-fixture.py` extracts only that digest from a layout pulled
-by linux-oci-builder; `node-smoke.py --root ROOT` runs the version gate. The image
+by linux-oci-builder; `node-smoke.py --root ROOT` runs version, arithmetic and filesystem gates. The image
 manifest is `sha256:025b8e975a61d94e33abeafaad1255ef44e4898cf1a1b6446860009c72e6d284`;
 the Node executable SHA-256 is `5a92a46a1d8279fec6776e3123ca22e26a6fddbb7cf1b55e019dbb38eea8ff26`.
 The JavaScript gate uses `--jitless`: the current `--jitless -p '1 + 2'`
 probe has progressed through thread startup and SIMD/conditional-move feature checks,
 and now evaluates JavaScript, runs the builder's file-I/O body and exits cleanly
-with `--jitless`. Normal Node startup currently needs separate virtual reservation
-and backed-memory accounting for its 512 MiB CodeRange.
+with `--jitless`. Normal Node JavaScript evaluation and file I/O also exit cleanly after
+separating virtual reservations from backed-memory accounting for its 512 MiB CodeRange.
 The feature qualifications are documented in [CPU-FEATURES.md](CPU-FEATURES.md). CLI `--max-memory BYTES` and `--max-image-size BYTES`
 expose existing runtime limits for this 130 MB executable.
 
@@ -448,3 +448,28 @@ checkpoint's file-I/O body to exit zero. The latter two use --jitless and the pi
 Alpine/musl image, so they are not the original Debian-image checkpoint or a JIT
 claim. The arithmetic control also passes natively and in the preserved C
 interpreter with an explicit musl loader; the C control is not rootfs-isolated.
+
+
+## Virtual reservations and page discard
+
+`max_memory` / `--max-memory` limits storage-backed guest pages (64 MiB by
+default). `max_virtual_memory` / `--max-virtual-memory` separately limits mapped
+address space (4 GiB by default). Both budgets apply across the guest process
+tree, counting shared thread/vfork address spaces once. Inaccessible anonymous
+reservations allocate page metadata without page contents. Enabling access
+allocates zeroed backing; disabling access preserves previous contents and their
+budget. Metadata and runtime overhead are additional host allocations, bounded
+by the virtual-page and task limits rather than included in `max_memory`.
+
+Anonymous private `MADV_DONTNEED` zeroes accessible pages and releases backing
+for inaccessible pages. It preserves permissions and fork advice. Discarding
+file-backed contents remains unsupported because reload provenance is not yet
+retained. Native comparisons cover a 512 MiB reservation, protection changes,
+content preservation and discard. A separate runtime policy test checks that
+fork cannot duplicate reservations beyond the aggregate virtual budget.
+
+The five pinned Node cases pass locally: version, arithmetic and file I/O with
+and without `--jitless`. Normal arithmetic also agrees with native Linux and
+the preserved C interpreter. A separate 100,000-iteration JavaScript loop prints
+`14999950000` and exits cleanly; this does not establish complete V8 coverage
+or implement a Rust host JIT.
