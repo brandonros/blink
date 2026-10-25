@@ -35,6 +35,58 @@ impl Semantics for Precision53 {
     const BITS: usize = 68;
     const EXP_BITS: usize = 15;
 }
+// Extended-exponent formats retain the selected significand precision while
+// computing the scaled result required by unmasked overflow/underflow traps.
+struct Trap24;
+impl Semantics for Trap24 {
+    const BITS: usize = 41;
+    const EXP_BITS: usize = 17;
+}
+struct Trap53;
+impl Semantics for Trap53 {
+    const BITS: usize = 70;
+    const EXP_BITS: usize = 17;
+}
+struct Trap64;
+impl Semantics for Trap64 {
+    const BITS: usize = 81;
+    const EXP_BITS: usize = 17;
+}
+fn wrapped_arithmetic<F>(
+    op: Op,
+    x: Extended,
+    y: Extended,
+    control: u16,
+    round: Round,
+) -> Option<(u128, u16, bool)>
+where
+    F: Float + FloatConvert<Extended>,
+    IeeeFloat<Intermediate>: FloatConvert<F>,
+{
+    let wx: IeeeFloat<Intermediate> = x.convert(&mut false).value;
+    let wy: IeeeFloat<Intermediate> = y.convert(&mut false).value;
+    let wide = calculate(op, wx, wy, Round::TowardZero);
+    let mut exact = wide.value;
+    if wide.status.contains(Status::INEXACT) {
+        exact = IeeeFloat::<Intermediate>::from_bits(exact.to_bits() | 1);
+    }
+    let result: rustc_apfloat::StatusAnd<F> = exact.convert_r(round, &mut false);
+    let flag = if control & 8 == 0 && result.value.abs() >= F::from_u128(1).value.scalbn(16384) {
+        8
+    } else if control & 16 == 0
+        && !result.value.is_zero()
+        && result.value.abs() < F::from_u128(1).value.scalbn(-16382)
+    {
+        16
+    } else {
+        return None;
+    };
+    let scaled = result.value.scalbn(if flag == 8 { -24576 } else { 24576 });
+    let converted: Extended = scaled.convert(&mut false).value;
+    let truncated: F = exact.convert_r(Round::TowardZero, &mut false).value;
+    let up = result.status.contains(Status::INEXACT) && result.value.abs() > truncated.abs();
+    Some((converted.to_bits(), flag | flags(result.status), up))
+}
 fn reduced<F>(
     op: Op,
     x: Extended,
@@ -1661,11 +1713,55 @@ impl X86 {
                 } else if result.value.is_nan() && !x.is_nan() && !y.is_nan() {
                     bits = INDEFINITE;
                 }
+                let blocked_denormal = exceptions & !self.fpu.control & 2 != 0;
+                if blocked_denormal {
+                    exceptions &= !56;
+                }
+                let wrapped = if !blocked_denormal
+                    && self.fpu.control & 24 != 24
+                    && x.is_finite()
+                    && y.is_finite()
+                    && exceptions & 5 == 0
+                {
+                    match (self.fpu.control >> 8) & 3 {
+                        0 => wrapped_arithmetic::<IeeeFloat<Trap24>>(
+                            op,
+                            x,
+                            y,
+                            self.fpu.control,
+                            self.fpu.round(),
+                        ),
+                        2 => wrapped_arithmetic::<IeeeFloat<Trap53>>(
+                            op,
+                            x,
+                            y,
+                            self.fpu.control,
+                            self.fpu.round(),
+                        ),
+                        3 => wrapped_arithmetic::<IeeeFloat<Trap64>>(
+                            op,
+                            x,
+                            y,
+                            self.fpu.control,
+                            self.fpu.round(),
+                        ),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                let mut rounded_up = rounded_up && !blocked_denormal;
+                if let Some((value, raised, up)) = wrapped {
+                    bits = value;
+                    exceptions = (exceptions & !56) | raised;
+                    rounded_up = up;
+                }
                 self.fpu.status &= !0x200;
-                if result.status.contains(Status::INEXACT) && rounded_up {
+                if rounded_up {
                     self.fpu.status |= 0x200;
                 }
-                if self.fpu.exception(exceptions) {
+                let complete = self.fpu.exception(exceptions);
+                if complete || (wrapped.is_some() && exceptions & !self.fpu.control & 7 == 0) {
                     self.fpu.set(n, bits);
                     if matches!(
                         op,
@@ -1912,6 +2008,28 @@ mod tests {
             assert_eq!(cpu.fpu.get(0, &mut 0), x.to_bits());
             assert_eq!(cpu.fpu.status() & 0x8081, 0x8081);
         }
+    }
+    #[test]
+    fn unmasked_overflow_commits_scaled_result_and_pop() {
+        let (mut cpu, mut memory) = machine(&[0x90]);
+        cpu.fpu.set(0, Extended::largest().to_bits());
+        cpu.fpu.set(1, Extended::from_u128(2).value.to_bits());
+        cpu.fpu.control &= !8;
+        cpu.x87(
+            &mut memory,
+            Op::FMULP,
+            Some(Value::FloatStack(1)),
+            Some(Value::FloatStack(0)),
+            0x1000,
+        )
+        .unwrap();
+        assert_eq!(cpu.fpu.top, 1);
+        assert_eq!(cpu.fpu.get(0, &mut 0), 0x1fff_ffff_ffff_ffff_ffff);
+        assert_eq!(cpu.fpu.status() & 0x80bf, 0x8088);
+        assert!(matches!(
+            cpu.x87(&mut memory, Op::WAIT, None, None, 0x1000),
+            Err(Error::ArithmeticFault)
+        ));
     }
     #[test]
     fn unmasked_precision_commits_store_and_pop_before_deferred_fault() {
