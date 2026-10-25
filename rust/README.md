@@ -595,7 +595,7 @@ All other exception comparisons remain strict. C1 and last-bit differences remai
 expected for approximate instructions, and full FPU support is still incomplete.
 
 Unmasked precision exceptions now commit the rounded result, memory store and
-stack pop before setting the deferred exception state. A separate 31,776-record
+stack pop before setting the deferred exception state. A separate 32,928-record
 native oracle covers add/multiply/divide, square root, rounding, float/integer/BCD
 stores and popping arithmetic across precision and rounding controls, with precision, overflow, underflow and denormal exceptions
 masked and unmasked. CI replays those exact bytes on Apple Silicon. Basic arithmetic now commits the exponent-adjusted register result on unmasked
@@ -618,3 +618,9 @@ The native fpsignal fixture checks recovery on an alternate stack for integer
 divide, x87 divide/precision and SSE divide faults, plus fatal dispositions in
 forked children. It is replayed on Apple Silicon. This does not yet add catchable
 SIGSEGV/SIGBUS/SIGILL, core dumps or complete Linux synchronous-signal behavior.
+
+The exception corpus additionally checks unmasked denormal FLD (which normalizes
+and pushes before trapping), overflow/underflow FST memory operations (which do
+not round, store or pop), signaling-NaN loads/stores and legacy 8087/287 no-ops
+with pending exceptions. These native checks caught distinct completion rules
+that cannot be represented by a single blanket “unmasked means no write” rule.

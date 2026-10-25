@@ -517,7 +517,13 @@ impl Fpu {
             self.status |= 0x200;
             value = INDEFINITE;
         }
-        if self.exception(exceptions) {
+        if exceptions & 1 != 0 {
+            exceptions &= !2;
+        }
+        let complete = self.exception(exceptions);
+        // FLD normalizes and pushes a denormal memory operand even when DE
+        // is unmasked; arithmetic operations have different completion rules.
+        if complete || exceptions & !self.control & 63 == 2 {
             self.top = next;
             self.set(0, value);
         }
@@ -625,6 +631,9 @@ impl X86 {
                 | Op::FLDCW
                 | Op::WAIT
                 | Op::FNOP
+                | Op::FENI8087_NOP
+                | Op::FDISI8087_NOP
+                | Op::FSETPM287_NOP
                 | Op::FLD
                 | Op::FILD
                 | Op::FBLD
@@ -699,7 +708,15 @@ impl X86 {
         }
         if !matches!(
             op,
-            Op::FNINIT | Op::FNCLEX | Op::FNSTCW | Op::FNSTSW | Op::FNSTENV | Op::FNSAVE
+            Op::FNINIT
+                | Op::FNCLEX
+                | Op::FNSTCW
+                | Op::FNSTSW
+                | Op::FNSTENV
+                | Op::FNSAVE
+                | Op::FENI8087_NOP
+                | Op::FDISI8087_NOP
+                | Op::FSETPM287_NOP
         ) && self.fpu.status & !self.fpu.control & 63 != 0
         {
             return Err(self.fpu.fault());
@@ -712,6 +729,9 @@ impl X86 {
                 | Op::FNSTSW
                 | Op::FLDCW
                 | Op::WAIT
+                | Op::FENI8087_NOP
+                | Op::FDISI8087_NOP
+                | Op::FSETPM287_NOP
                 | Op::FNSTENV
                 | Op::FLDENV
                 | Op::FNSAVE
@@ -794,7 +814,7 @@ impl X86 {
                 self.fpu.status &= !0x8080;
                 self.fpu.exception(0);
             }
-            Op::WAIT | Op::FNOP => {}
+            Op::WAIT | Op::FNOP | Op::FENI8087_NOP | Op::FDISI8087_NOP | Op::FSETPM287_NOP => {}
             Op::FBLD => {
                 let Value::Memory { address, width: 10 } = b.or(a).ok_or_else(bad)? else {
                     return Err(bad());
@@ -953,6 +973,12 @@ impl X86 {
                 };
                 if let Value::Memory { address, width } = dst {
                     memory.check(address, width, blink_core::Access::Write)?;
+                }
+                if exceptions & !self.fpu.control & 24 != 0 {
+                    // Unlike a register result, an unmasked overflow/underflow
+                    // store does not round or write its memory destination.
+                    exceptions &= !32;
+                    c1 = false;
                 }
                 self.fpu.status &= !0x200;
                 if c1 {
@@ -2088,6 +2114,27 @@ mod tests {
             assert_eq!(cpu.fpu.get(0, &mut 0), x.to_bits());
             assert_eq!(cpu.fpu.status() & 0x8081, 0x8081);
         }
+    }
+    #[test]
+    fn unmasked_denormal_load_pushes_normalized_value() {
+        let (mut cpu, mut memory) = machine(&[0xd9, 0x00]);
+        cpu.regs[0] = 0x2000;
+        memory.write(0x2000, &1u32.to_le_bytes()).unwrap();
+        cpu.fpu.control &= !2;
+        cpu.step(&mut memory).unwrap();
+        assert_eq!(cpu.fpu.top, 7);
+        assert_eq!(
+            cpu.fpu.get(0, &mut 0),
+            Extended::from_u128(1).value.scalbn(-149).to_bits()
+        );
+        assert_eq!(cpu.fpu.status() & 0x80bf, 0x8082);
+        assert!(matches!(
+            cpu.x87(&mut memory, Op::WAIT, None, None, 0x1000),
+            Err(Error::FloatingPointFault {
+                exceptions: 2,
+                simd: false
+            })
+        ));
     }
     #[test]
     fn unmasked_transcendental_underflow_commits_both_stack_outputs() {
