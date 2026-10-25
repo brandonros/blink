@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate approximate FPATAN with native state and an independent 200-bit oracle."""
+"""Validate approximate x87 transcendentals with native state and an independent 200-bit oracle."""
 import argparse
 import hashlib
 import json
@@ -13,13 +13,13 @@ repo = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--replay', type=Path)
 args = parser.parse_args()
-output = args.replay or repo/'target/atan-regressions'
+output = args.replay or repo/'target/transcend-regressions'
 output.mkdir(parents=True, exist_ok=True)
 subprocess.run(['cargo', 'build', '--release', '--offline', '-p', 'blink-cli'], cwd=repo, check=True)
-fixture = output/'atan-x86_64'
+fixture = output/'transcend-x86_64'
 if not args.replay:
     assert (platform.system(), platform.machine()) == ('Linux', 'x86_64')
-    subprocess.run(['cc', '-nostdlib', '-static', '-ffreestanding', '-fno-stack-protector', '-mno-sse', '-mno-mmx', '-mno-red-zone', '-O2', '-Wl,--build-id=none', '-o', str(fixture), str(repo/'rust/fixtures/atan-x86_64.c')], check=True)
+    subprocess.run(['cc', '-nostdlib', '-static', '-ffreestanding', '-fno-stack-protector', '-mno-sse', '-mno-mmx', '-mno-red-zone', '-O2', '-Wl,--build-id=none', '-o', str(fixture), str(repo/'rust/fixtures/transcend-x86_64.c')], check=True)
     native = subprocess.run([str(fixture.resolve())], capture_output=True, timeout=60)
     assert native.returncode == 0 and not native.stderr
     (output/'native.bin').write_bytes(native.stdout)
@@ -29,6 +29,7 @@ assert rust.returncode == 0 and not rust.stderr, (rust.returncode, rust.stderr)
 (output/'rust.bin').write_bytes(rust.stdout)
 assert len(native) == len(rust.stdout) and len(native) % 40 == 0
 mp.mp.prec = 200
+largest_extended = (mp.mpf(2)-mp.power(2, -63))*mp.power(2, 16383)
 
 def decode(data):
     fraction, raw_exp = struct.unpack('<QH', data)
@@ -52,17 +53,29 @@ for index in range(len(native)//40):
     if (native_sw ^ rust_sw) & ~0x200:
         errors.append(dict(record=index, reason='status', native=hex(native_sw), rust=hex(rust_sw)))
     x, y = decode(a[:10]), decode(a[10:20])
-    if x is None or y is None:
+    operation = struct.unpack('<H', a[34:36])[0]
+    if x is None or (operation != 1 and y is None):
         if a[20:30] != b[20:30]:
             errors.append(dict(record=index, reason='special result'))
         continue
     # mpmath does not preserve signed zero. Native comparison covers its sign
     # and the quadrant cases whose input contains zero or infinity.
-    if not x or not y or mp.isinf(x) or mp.isinf(y):
+    if not x or mp.isinf(x) or (operation != 1 and (not y or mp.isinf(y))):
         if a[20:30] != b[20:30]:
             errors.append(dict(record=index, reason='zero/infinity quadrant'))
         continue
-    reference = mp.atan2(y, x)
+    if (operation == 2 and x < 0) or (operation == 3 and x <= -1):
+        if a[20:30] != b[20:30]:
+            errors.append(dict(record=index, reason='invalid logarithm'))
+        continue
+    reference = (mp.atan2(y, x) if operation == 0 else mp.expm1(x*mp.ln(2)) if operation == 1
+                 else y*mp.log(x, 2) if operation == 2 else y*mp.log1p(x)/mp.ln(2))
+    if not reference and a[20:30] != b[20:30]:
+        errors.append(dict(record=index, reason='exact zero'))
+    if abs(reference) > largest_extended:
+        if a[20:30] != b[20:30]:
+            errors.append(dict(record=index, reason='overflow result'))
+        continue
     if a[20:30] != b[20:30]:
         last_bit_differences += 1
     for engine, data in [('native', a), ('rust', b)]:

@@ -554,12 +554,12 @@ Focused boundary cases check tininess before rounding into minimum normal.
 FPATAN uses software arithmetic with 126-bit intermediate significands and
 quadrant reduction; it never calls the host floating-point environment. Its
 approximate result can differ from a physical CPU in the last bit. The separate
-`atan-regressions.py` gate checks 29,868 records against native state and an
+`transcend-regressions.py` gate checks 119,472 records against native state and an
 independent 200-bit mpmath 1.3.0 reference. The explicit regression bounds are one
 extended ulp for nearest rounding and 1.5 ulps for directed rounding. C1 describes
 each implementation's internal rounding and is excluded from native bit equality;
 other status bits, stack effects and special results must agree. Observed maxima
-were about 1.034 ulps native and 1 ulp Rust; 399 results differed in their last bit.
+were about 1.265 ulps native and 1 ulp Rust; 4,038 results differed in their last bit.
 CI replays the fixture and accuracy checks on Apple Silicon. The exact arithmetic
 oracle remains separate and bit-exact. These corpora are not exhaustive proofs,
 and the complete x87 FPU feature remains unadvertised.
@@ -569,3 +569,10 @@ The persistent builder adapter is in
 Its Linux and Apple Silicon CI verifies context reuse, metadata, timeout/failure
 recovery, receipts/resume, root locking and standalone non-root commands. Complete
 agent-platform builds and OCI verification remain outstanding.
+
+The transcendental gate also covers F2XM1, FYL2X and FYL2XP1. Exponential
+inputs are within [-1, 1] plus special encodings; finite F2XM1 inputs outside
+its defined range fail explicitly. FYL2X spans the extended exponent range.
+FYL2XP1 numerical qualification uses |x| < 1/4, plus zero/NaN/infinity states,
+within its documented accurate input range. Logarithm zero/divide-by-zero and
+invalid-operation priority are checked independently of approximation error.

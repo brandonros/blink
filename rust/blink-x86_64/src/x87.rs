@@ -201,20 +201,91 @@ fn atan2(y: Extended, x: Extended, round: Round) -> (u128, u16, bool) {
     if y.is_negative() {
         angle = -angle;
     }
-    let result: rustc_apfloat::StatusAnd<Extended> = angle.convert_r(round, &mut false);
+    transcend_result(angle, round, !angle.is_zero())
+}
+fn transcend_result(value: Math, round: Round, precision: bool) -> (u128, u16, bool) {
+    let result: rustc_apfloat::StatusAnd<Extended> = value.convert_r(round, &mut false);
     let widened: Math = result.value.convert(&mut false).value;
     let mut exceptions = flags(result.status);
-    if !angle.is_zero() {
+    if precision {
         exceptions |= 32;
     }
-    if exceptions & 32 != 0 && angle.abs() < Math::from_u128(1).value.scalbn(-16382) {
+    if exceptions & 32 != 0 && value.abs() < Math::from_u128(1).value.scalbn(-16382) {
         exceptions |= 16;
+    }
+    if result.value.abs() == Extended::largest()
+        && value.abs() >= Math::from_u128(1).value.scalbn(16384)
+    {
+        exceptions |= 8;
     }
     (
         result.value.to_bits(),
         exceptions,
-        widened.abs() > angle.abs(),
+        widened.abs() > value.abs(),
     )
+}
+fn ln2() -> Math {
+    Math::from_u128(0xb172_17f7_d1cf_79ab_c9e3_b398_03f2_f6af)
+        .value
+        .scalbn(-128)
+}
+fn exp2_minus_one(x: Extended, round: Round) -> (u128, u16, bool) {
+    let one = Extended::from_u128(1).value;
+    if x.abs() == one {
+        return (
+            if x.is_negative() {
+                (-one.scalbn(-1)).to_bits()
+            } else {
+                one.to_bits()
+            },
+            32,
+            false,
+        );
+    }
+    let wx: Math = x.convert(&mut false).value;
+    let z = (wx * ln2()).value;
+    let mut term = z;
+    let mut sum = z;
+    for n in 2..256 {
+        term = ((term * z).value / Math::from_u128(n).value).value;
+        let next = (sum + term).value;
+        if next == sum {
+            break;
+        }
+        sum = next;
+    }
+    transcend_result(sum, round, true)
+}
+
+fn log_series(z: Math) -> Math {
+    let square = (z * z).value;
+    let mut power = z;
+    let mut sum = z;
+    for n in 1..256 {
+        power = (power * square).value;
+        let next = (sum + (power / Math::from_u128(2 * n + 1).value).value).value;
+        if next == sum {
+            break;
+        }
+        sum = next;
+    }
+    (sum.scalbn(1) / ln2()).value
+}
+fn log2_positive(x: Math) -> Math {
+    let exponent = x.ilogb();
+    let one = Math::from_u128(1).value;
+    let mantissa = x.scalbn(-exponent);
+    (Math::from_i128(exponent as i128).value
+        + log_series(((mantissa - one).value / (mantissa + one).value).value))
+    .value
+}
+fn log2_plus_one(x: Math) -> Math {
+    let one = Math::from_u128(1).value;
+    if x.abs() <= one.scalbn(-1) {
+        log_series((x / (one.scalbn(1) + x).value).value)
+    } else {
+        log2_positive((one + x).value)
+    }
 }
 const INDEFINITE: u128 = 0xffff_c000_0000_0000_0000;
 fn unsupported_extended(bits: u128) -> bool {
@@ -488,6 +559,9 @@ impl X86 {
                 | Op::FSCALE
                 | Op::FPREM
                 | Op::FPATAN
+                | Op::F2XM1
+                | Op::FYL2X
+                | Op::FYL2XP1
                 | Op::FPREM1
                 | Op::FXTRACT
         ) {
@@ -888,6 +962,139 @@ impl X86 {
                     self.fpu.set(0, significand);
                 }
             }
+            Op::FYL2X | Op::FYL2XP1 => {
+                let mut exceptions = 0;
+                let xb = self.fpu.get(0, &mut exceptions);
+                let yb = self.fpu.get(1, &mut exceptions);
+                let x = arithmetic_input(xb, &mut exceptions);
+                let y = arithmetic_input(yb, &mut exceptions);
+                let plus_one = op == Op::FYL2XP1;
+                let one = Extended::from_u128(1).value;
+                let zero_argument = if plus_one { x == -one } else { x.is_zero() };
+                let negative_argument = if plus_one {
+                    x < -one
+                } else {
+                    x.is_negative() && !x.is_zero()
+                };
+                let zero_log = if plus_one { x.is_zero() } else { x == one };
+                let (bits, raised, up) = if unsupported_extended(xb)
+                    || unsupported_extended(yb)
+                    || exceptions & 0x40 != 0
+                {
+                    (INDEFINITE, 1, false)
+                } else if x.is_nan() || y.is_nan() {
+                    let chosen = if !x.is_nan() {
+                        yb
+                    } else if !y.is_nan() {
+                        xb
+                    } else if x.is_signaling() != y.is_signaling() {
+                        if x.is_signaling() {
+                            yb
+                        } else {
+                            xb
+                        }
+                    } else if xb as u64 != yb as u64 {
+                        if xb as u64 > yb as u64 {
+                            xb
+                        } else {
+                            yb
+                        }
+                    } else {
+                        xb.min(yb)
+                    };
+                    exceptions &= !2;
+                    (
+                        chosen | (1 << 62),
+                        u16::from(x.is_signaling() || y.is_signaling()),
+                        false,
+                    )
+                } else if negative_argument
+                    || (y.is_zero() && (zero_argument || x.is_infinite()))
+                    || (zero_log && y.is_infinite())
+                {
+                    (INDEFINITE, 1, false)
+                } else if zero_argument {
+                    (
+                        Extended::INFINITY.copy_sign(-y).to_bits(),
+                        if y.is_infinite() { 0 } else { 4 },
+                        false,
+                    )
+                } else if x.is_infinite() {
+                    (Extended::INFINITY.copy_sign(y).to_bits(), 0, false)
+                } else {
+                    let wx: Math = x.convert(&mut false).value;
+                    let wy: Math = y.convert(&mut false).value;
+                    let log = if plus_one {
+                        log2_plus_one(wx)
+                    } else {
+                        log2_positive(wx)
+                    };
+                    if y.is_infinite() {
+                        (
+                            (if y.is_negative() != log.is_negative() {
+                                -Extended::INFINITY
+                            } else {
+                                Extended::INFINITY
+                            })
+                            .to_bits(),
+                            0,
+                            false,
+                        )
+                    } else {
+                        let value = (wy * log).value;
+                        transcend_result(value, self.fpu.round(), !y.is_zero() && !zero_log)
+                    }
+                };
+                exceptions |= raised;
+                if exceptions & 5 != 0 {
+                    exceptions &= !2;
+                }
+                self.fpu.status &= !0x200;
+                if up {
+                    self.fpu.status |= 0x200;
+                }
+                if self.fpu.exception(exceptions) {
+                    self.fpu.set(1, bits);
+                    self.fpu.pop();
+                }
+            }
+            Op::F2XM1 => {
+                let mut exceptions = 0;
+                let bits = self.fpu.get(0, &mut exceptions);
+                let value = arithmetic_input(bits, &mut exceptions);
+                let (result, raised, up) = if unsupported_extended(bits) || exceptions & 0x40 != 0 {
+                    (INDEFINITE, 1, false)
+                } else if value.is_nan() {
+                    (bits | (1 << 62), u16::from(value.is_signaling()), false)
+                } else if value.is_zero() {
+                    (bits, 0, false)
+                } else if value.is_infinite() {
+                    (
+                        if value.is_negative() {
+                            Extended::from_i128(-1).value.to_bits()
+                        } else {
+                            bits
+                        },
+                        0,
+                        false,
+                    )
+                } else if value.abs() > Extended::from_u128(1).value {
+                    return Err(bad());
+                } else {
+                    exp2_minus_one(value, self.fpu.round())
+                };
+                exceptions |= raised;
+                if exceptions & 5 != 0 {
+                    exceptions &= !2;
+                }
+                self.fpu.status &= !0x200;
+                if up {
+                    self.fpu.status |= 0x200;
+                }
+                if self.fpu.exception(exceptions) {
+                    self.fpu.set(0, result);
+                }
+            }
             Op::FPATAN => {
                 let mut exceptions = 0;
                 let xb = self.fpu.get(0, &mut exceptions);
@@ -929,7 +1136,7 @@ impl X86 {
                     atan2(y, x, self.fpu.round())
                 };
                 exceptions |= raised;
-                if exceptions & 1 != 0 {
+                if exceptions & 5 != 0 {
                     exceptions &= !2;
                 }
                 self.fpu.status &= !0x200;
