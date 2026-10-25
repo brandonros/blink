@@ -1,4 +1,5 @@
 //! Host operations kept separate from guest ABI layouts.
+pub mod metadata;
 use std::{
     collections::VecDeque,
     fs, io,
@@ -173,7 +174,13 @@ pub fn read_at(file: &fs::File, bytes: &mut [u8], offset: u64) -> io::Result<usi
     }
 }
 
-pub fn path_stat(root: &Path, cwd: &Path, guest: &Path, nofollow: bool) -> io::Result<FileStat> {
+pub fn path_stat(
+    root: &Path,
+    cwd: &Path,
+    guest: &Path,
+    nofollow: bool,
+    rootless: bool,
+) -> io::Result<FileStat> {
     let path = if nofollow {
         if let Some(name) = guest.file_name() {
             let parent = guest
@@ -187,11 +194,144 @@ pub fn path_stat(root: &Path, cwd: &Path, guest: &Path, nofollow: bool) -> io::R
     } else {
         resolve_from(root, cwd, guest, false)?
     };
-    file_stat(&if nofollow {
-        fs::symlink_metadata(path)?
-    } else {
-        fs::metadata(path)?
-    })
+    metadata::Target::Path(&path).stat(rootless)
+}
+
+/// Resolve a directory entry without following its final symlink. Used for
+/// unlink/rename/link creation; never remove the context root through `/` or `..`.
+pub fn entry_path(root: &Path, cwd: &Path, guest: &Path) -> io::Result<PathBuf> {
+    let raw = guest.as_os_str().as_encoded_bytes();
+    let trimmed = raw.strip_suffix(b"/").unwrap_or(raw);
+    let leaf = trimmed.rsplit(|b| *b == b'/').next().unwrap_or_default();
+    if leaf.is_empty() || leaf == b"." || leaf == b".." {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid mutation entry",
+        ));
+    }
+    let name = guest
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing entry"))?;
+    let parent = guest
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    Ok(resolve_from(root, cwd, parent, false)?.join(name))
+}
+pub fn mkdir(path: &Path, mode: u32) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(mode & 0o7777);
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    builder.create(path)
+}
+pub fn chmod(path: &Path, mode: u32) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o7777))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+        Err(io::ErrorKind::Unsupported.into())
+    }
+}
+pub fn fchmod(file: &fs::File, mode: u32) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(mode & 0o7777))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, mode);
+        Err(io::ErrorKind::Unsupported.into())
+    }
+}
+pub fn symlink(target: &Path, path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, path)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (target, path);
+        Err(io::ErrorKind::Unsupported.into())
+    }
+}
+
+#[derive(Clone)]
+pub struct DirectoryEntry {
+    pub inode: u64,
+    pub kind: u8,
+    pub name: Vec<u8>,
+}
+pub struct Directory {
+    pub file: fs::File,
+    pub path: PathBuf,
+    root: PathBuf,
+    pub position: u64,
+    entries: fs::ReadDir,
+    pending: VecDeque<DirectoryEntry>,
+}
+impl Directory {
+    pub fn open(path: PathBuf, root: PathBuf) -> io::Result<Self> {
+        let file = fs::File::open(&path)?;
+        let inode = file_stat(&file.metadata()?)?.ino;
+        let parent = file_stat(&fs::metadata(if path == root {
+            &path
+        } else {
+            path.parent().unwrap_or(&path)
+        })?)?
+        .ino;
+        let pending = VecDeque::from([
+            DirectoryEntry {
+                inode,
+                kind: 4,
+                name: b".".to_vec(),
+            },
+            DirectoryEntry {
+                inode: parent,
+                kind: 4,
+                name: b"..".to_vec(),
+            },
+        ]);
+        Ok(Self {
+            entries: fs::read_dir(&path)?,
+            file,
+            path,
+            root,
+            position: 0,
+            pending,
+        })
+    }
+    pub fn peek(&mut self) -> io::Result<Option<DirectoryEntry>> {
+        if self.pending.is_empty() {
+            if let Some(entry) = self.entries.next() {
+                let entry = entry?;
+                let stat = file_stat(&fs::symlink_metadata(entry.path())?)?;
+                self.pending.push_back(DirectoryEntry {
+                    inode: stat.ino,
+                    kind: ((stat.mode >> 12) & 15) as u8,
+                    name: entry.file_name().as_encoded_bytes().to_vec(),
+                });
+            }
+        }
+        Ok(self.pending.front().cloned())
+    }
+    pub fn advance(&mut self) {
+        self.pending.pop_front();
+        self.position += 1;
+    }
+    pub fn rewind(&mut self) -> io::Result<()> {
+        *self = Self::open(self.path.clone(), self.root.clone())?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

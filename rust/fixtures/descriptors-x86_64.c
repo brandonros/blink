@@ -19,6 +19,11 @@ __attribute__((noreturn)) void _start(void) {
     CHECK(call(72,d,2,1,0)==0 && call(72,d,1,0,0)==1);
     CHECK(call(33,d,d,0,0)==d && call(72,d,1,0,0)==1);
     CHECK(call(292,d,11,0x80000,0)==11 && call(72,11,1,0,0)==1);
+    struct {int fd; short events, revents;} pollfd={p[0],1,0};
+    CHECK(call(7,(long)&pollfd,1,0,0)==0 && pollfd.revents==0);
+    CHECK(call(7,(long)&pollfd,1,1,0)==0 && pollfd.revents==0);
+    pollfd.fd=d; pollfd.events=4;
+    CHECK(call(7,(long)&pollfd,1,0,0)==1 && pollfd.revents==4);
     struct vector v[]={{"vec",3},{"tors",4}};
     CHECK(call(20,d,(long)v,2,0)==7);
     char b[8]={0};

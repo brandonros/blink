@@ -275,6 +275,10 @@ impl Cpu for X86 {
             | Op::PAND
             | Op::PANDN
             | Op::POR
+            | Op::PCMPGTB
+            | Op::PCMPGTW
+            | Op::PCMPGTD
+            | Op::PCMPEQW
             | Op::PCMPEQB
             | Op::PCMPEQD
             | Op::PCMPEQQ
@@ -296,8 +300,36 @@ impl Cpu for X86 {
                             out[n] = if left[n] == right[n] { 255 } else { 0 };
                         }
                     }
-                    Op::PCMPEQD | Op::PCMPEQQ => {
-                        let lane = if op == Op::PCMPEQD { 4 } else { 8 };
+                    Op::PCMPGTB | Op::PCMPGTW | Op::PCMPGTD => {
+                        let lane = match op {
+                            Op::PCMPGTB => 1,
+                            Op::PCMPGTW => 2,
+                            _ => 4,
+                        };
+                        for n in (0..16).step_by(lane) {
+                            let mut l = [0; 8];
+                            let mut r = [0; 8];
+                            l[..lane].copy_from_slice(&left[n..n + lane]);
+                            r[..lane].copy_from_slice(&right[n..n + lane]);
+                            out[n..n + lane].fill(
+                                if signed(u64::from_le_bytes(l), lane)
+                                    > signed(u64::from_le_bytes(r), lane)
+                                {
+                                    255
+                                } else {
+                                    0
+                                },
+                            );
+                        }
+                    }
+                    Op::PCMPEQW | Op::PCMPEQD | Op::PCMPEQQ => {
+                        let lane = if op == Op::PCMPEQW {
+                            2
+                        } else if op == Op::PCMPEQD {
+                            4
+                        } else {
+                            8
+                        };
                         for n in (0..16).step_by(lane) {
                             out[n..n + lane].fill(if left[n..n + lane] == right[n..n + lane] {
                                 255
@@ -548,6 +580,38 @@ impl Cpu for X86 {
                     self.flags = (self.flags & !1) | cf;
                 }
                 self.write(m, dst, v)?;
+            }
+            Op::SHLD | Op::SHRD => {
+                let dst = a.ok_or_else(bad)?;
+                let bits = dst.width() * 8;
+                let old = self.read(m, dst)?;
+                let src = self.read(m, b.ok_or_else(bad)?)?;
+                let count =
+                    (self.read(m, c.ok_or_else(bad)?)? & if bits == 64 { 63 } else { 31 }) as usize;
+                if count > bits {
+                    return Err(bad());
+                } // Architecturally undefined for 16-bit counts >16.
+                if count != 0 {
+                    let combined = if op == Op::SHLD {
+                        ((old as u128) << bits) | src as u128
+                    } else {
+                        ((src as u128) << bits) | old as u128
+                    };
+                    let (value, carry) = if op == Op::SHLD {
+                        (
+                            ((combined << count) >> bits) as u64,
+                            (old >> (bits - count)) & 1,
+                        )
+                    } else {
+                        ((combined >> count) as u64, (old >> (count - 1)) & 1)
+                    };
+                    let value = self.logical(value, dst.width());
+                    self.flags |= carry;
+                    if count == 1 {
+                        self.flags |= (((old ^ value) >> (bits - 1)) & 1) << 11;
+                    }
+                    self.write(m, dst, value)?;
+                }
             }
             Op::SHL | Op::SAL | Op::SHR | Op::SAR => {
                 let dst = a.ok_or_else(bad)?;
@@ -1093,5 +1157,25 @@ mod vector_tests {
         c.fs_base = 0x2028;
         c.step(&mut m).unwrap();
         assert_eq!(c.regs[0], 42);
+    }
+}
+
+#[cfg(test)]
+mod byte_swap_tests {
+    use super::*;
+    #[test]
+    fn byte_swap_register_width() {
+        let mut memory = Memory::new(4096);
+        memory.map(4096, 4096, blink_core::Permissions::RX).unwrap();
+        memory
+            .initialize(4096, &[0x0f, 0xce, 0x48, 0x0f, 0xca])
+            .unwrap();
+        let mut cpu = X86::new(4096, 0);
+        cpu.regs[6] = 0x1122334412345678;
+        cpu.regs[2] = 0x1122334455667788;
+        cpu.step(&mut memory).unwrap();
+        assert_eq!(cpu.regs[6], 0x78563412);
+        cpu.step(&mut memory).unwrap();
+        assert_eq!(cpu.regs[2], 0x8877665544332211);
     }
 }

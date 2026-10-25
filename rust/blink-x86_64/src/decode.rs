@@ -117,6 +117,15 @@ pub(super) fn operand(
                     *width = if i.prefixes.operand_size() { 2 } else { 4 };
                 }
             }
+            // Like MOVSXD, yaxpeax 2.2.0 reports qword BSWAP without REX.W.
+            // BSWAP defaults to 32 bits; 0x66 does not select a 16-bit swap.
+            if i.opcode() == yaxpeax_x86::long_mode::Opcode::BSWAP
+                && !i.prefixes.rex().is_some_and(|r| r.w())
+            {
+                if let Value::Register { width, .. } = &mut value {
+                    *width = 4;
+                }
+            }
             return Ok(value);
         }
         Operand::ImmediateI8 { imm } => return Ok(Value::Immediate(imm as i64 as u64)),

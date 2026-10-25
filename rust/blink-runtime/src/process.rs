@@ -3,7 +3,7 @@ use crate::{elf, Command, RunOutcome, RuntimeConfig, Termination};
 use blink_core::{Access, Cpu, Error, GuestArch, Memory, Permissions, Result, Step};
 use blink_linux::{Fd, Pipe, SignalAction, UNBLOCKABLE};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet, VecDeque},
     io::{Read, Seek, SeekFrom, Write},
     rc::Rc,
@@ -67,6 +67,7 @@ struct Process {
     descriptor_flags: Rc<RefCell<BTreeSet<i32>>>,
     group: u32,
     cwd: Rc<RefCell<std::path::PathBuf>>,
+    umask: Rc<Cell<u32>>,
     clear_tid: u64,
     robust_head: u64,
     actions: Rc<RefCell<[SignalAction; 64]>>,
@@ -74,7 +75,10 @@ struct Process {
     pending_signals: u64,
     signal_senders: [u32; 64],
     futex: Option<u64>,
+    futex_syscall: Option<u64>,
     poll_deadline: Option<Instant>,
+    vfork_wait: Option<u32>,
+    vfork_parent: Option<u32>,
     pending: Option<(u64, [u64; 6])>,
 }
 impl Process {
@@ -129,20 +133,57 @@ fn image(
     env: &[String],
     credentials: &blink_linux::Credentials,
 ) -> Result<elf::Image> {
-    let bytes = read_image(config, cwd, path)?;
-    let interp = elf::interpreter(&bytes)?
-        .map(|path| read_image(config, cwd, std::path::Path::new(&path)))
-        .transpose()?;
-    elf::load(
-        &bytes,
-        interp.as_deref(),
-        config.guest_arch,
-        config.max_memory,
-        args,
-        env,
-        credentials,
-    )
+    let mut path = path.to_path_buf();
+    let mut args = args.to_vec();
+    for depth in 0..=4 {
+        let bytes = read_image(config, cwd, &path)?;
+        if bytes.starts_with(b"#!") {
+            if depth == 4 {
+                return Err(Error::InvalidElf("script interpreter recursion".into()));
+            }
+            let line = bytes.get(2..bytes.len().min(256)).unwrap_or_default();
+            let end = line.iter().position(|b| *b == b'\n');
+            if end.is_none() && bytes.len() >= 256 {
+                return Err(Error::InvalidElf("overlong interpreter line".into()));
+            }
+            let line = std::str::from_utf8(&line[..end.unwrap_or(line.len())])
+                .map_err(|_| Error::InvalidElf("non-UTF8 interpreter".into()))?;
+            let line = line.trim_matches([' ', '\t']);
+            let (interpreter, option) = match line.find([' ', '\t']) {
+                Some(n) => (&line[..n], line[n..].trim_matches([' ', '\t'])),
+                None => (line, ""),
+            };
+            if interpreter.is_empty() {
+                return Err(Error::InvalidElf("empty script interpreter".into()));
+            }
+            let mut script_args = vec![interpreter.to_owned()];
+            if !option.is_empty() {
+                script_args.push(option.to_owned());
+            }
+            script_args.push(path.to_string_lossy().into_owned());
+            script_args.extend(args.into_iter().skip(1));
+            args = script_args;
+            path = interpreter.into();
+            continue;
+        }
+        let interp = elf::interpreter(&bytes)?
+            .map(|path| read_image(config, cwd, std::path::Path::new(&path)))
+            .transpose()?;
+        let mut loaded = elf::load(
+            &bytes,
+            interp.as_deref(),
+            config.guest_arch,
+            config.max_memory,
+            &args,
+            env,
+            credentials,
+        )?;
+        loaded.executable = guest_executable(config, cwd, &path)?;
+        return Ok(loaded);
+    }
+    unreachable!()
 }
+
 fn read_image(
     config: &RuntimeConfig,
     cwd: &std::path::Path,
@@ -194,12 +235,13 @@ pub(super) fn run(
         Process {
             parent: 0,
             credentials,
-            executable: guest_executable(config, &cwd, &command.program)?,
+            executable: initial.executable,
             cpu: Engine::new(config.guest_arch, initial.entry, initial.stack),
             memory: Rc::new(RefCell::new(initial.memory)),
             heap: Rc::new(RefCell::new(Heap::new(initial.heap))),
             group: 1,
             cwd: Rc::new(RefCell::new(cwd)),
+            umask: Rc::new(Cell::new(0o22)),
             clear_tid: 0,
             robust_head: 0,
             actions: Rc::new(RefCell::new([SignalAction::default(); 64])),
@@ -207,7 +249,10 @@ pub(super) fn run(
             pending_signals: 0,
             signal_senders: [0; 64],
             futex: None,
+            futex_syscall: None,
             poll_deadline: None,
+            vfork_wait: None,
+            vfork_parent: None,
             fds: Rc::new(RefCell::new(BTreeMap::from([
                 (0, Fd::Stdin),
                 (1, Fd::Stdout),
@@ -242,6 +287,10 @@ pub(super) fn run(
         let mut event = Event::Ready;
         // A quantum bounds cancellation latency and keeps runnable guests fair.
         for _ in 0..256 {
+            if process.vfork_wait.is_some() {
+                event = Event::Blocked;
+                break;
+            }
             if let Some(signal) = deliver_signal(&mut process)? {
                 event = Event::Signal(signal);
                 break;
@@ -306,6 +355,8 @@ pub(super) fn run(
                         150 => 120,
                         158 => 115,
                         159 => 116,
+                        198 => 41,
+                        203 => 42,
                         71 => 40,
                         29 => 16,
                         66 => 20,
@@ -324,8 +375,21 @@ pub(super) fn run(
                         226 => 10,
                         56 => 257,
                         62 => 8,
+                        61 => 217,
                         17 => 79,
                         49 => 80,
+                        34 => 258,
+                        35 => 263,
+                        36 => 266,
+                        37 => 265,
+                        38 => 264,
+                        52 => 91,
+                        54 => 260,
+                        55 => 93,
+                        53 => 268,
+                        166 => 95,
+                        88 => 280,
+                        276 => 316,
                         64 => 1,
                         57 => 3,
                         59 => 293,
@@ -502,6 +566,7 @@ pub(super) fn run(
                                         &process.cwd.borrow(),
                                         std::path::Path::new(&path),
                                         false,
+                                        config.rootless_metadata,
                                     ) {
                                         Err(e) => blink_linux::errno(&e),
                                         Ok(stat) => {
@@ -541,7 +606,7 @@ pub(super) fn run(
                                         .fds
                                         .borrow()
                                         .get(&(args[0] as i32))
-                                        .map(|fd| fd.stat())
+                                        .map(|fd| fd.stat(config.rootless_metadata))
                                 } else {
                                     if nr == 262 && args[0] as i32 != -100 && !path.starts_with('/')
                                     {
@@ -557,6 +622,7 @@ pub(super) fn run(
                                         &process.cwd.borrow(),
                                         std::path::Path::new(path),
                                         flags & 256 != 0,
+                                        config.rootless_metadata,
                                     ))
                                 };
                                 match stat {
@@ -573,6 +639,86 @@ pub(super) fn run(
                                     }
                                 }
                             }
+                        }
+                    }
+                    41 => {
+                        if args[0] != 1 || args[1] & !(0x80000 | 0x800) != 1 || args[2] != 0 {
+                            return Err(Error::UnsupportedSyscall(number));
+                        }
+                        if let Some(fd) = process.fd() {
+                            process.fds.borrow_mut().insert(
+                                fd,
+                                Fd::UnixSocket {
+                                    inode: next_pipe,
+                                    nonblock: args[1] & 0x800 != 0,
+                                },
+                            );
+                            next_pipe += 1;
+                            if args[1] & 0x80000 != 0 {
+                                process.descriptor_flags.borrow_mut().insert(fd);
+                            }
+                            fd as u64
+                        } else {
+                            errno(24)
+                        }
+                    }
+                    42 => {
+                        let fds = process.fds.borrow();
+                        match fds.get(&(args[0] as i32)) {
+                            None => errno(9),
+                            Some(Fd::UnixSocket { .. }) => {
+                                if args[2] < 3 || args[2] > 110 {
+                                    errno(22)
+                                } else if process
+                                    .memory
+                                    .borrow()
+                                    .check(args[1], args[2] as usize, Access::Read)
+                                    .is_err()
+                                {
+                                    errno(14)
+                                } else {
+                                    let mut bytes = vec![0; args[2] as usize];
+                                    process.memory.borrow().read(
+                                        args[1],
+                                        &mut bytes,
+                                        Access::Read,
+                                    )?;
+                                    if u16::from_le_bytes([bytes[0], bytes[1]]) != 1 {
+                                        errno(22)
+                                    } else if bytes[2] == 0 {
+                                        return Err(Error::UnsupportedSyscall(number));
+                                    } else {
+                                        let bytes = &bytes[2..];
+                                        let end = bytes
+                                            .iter()
+                                            .position(|b| *b == 0)
+                                            .unwrap_or(bytes.len());
+                                        let path =
+                                            std::str::from_utf8(&bytes[..end]).map_err(|_| {
+                                                Error::InvalidConfig(
+                                                    "non-UTF8 Unix socket path".into(),
+                                                )
+                                            })?;
+                                        match blink_host::resolve_from(
+                                            &config.rootfs,
+                                            &process.cwd.borrow(),
+                                            std::path::Path::new(path),
+                                            false,
+                                        ) {
+                                            Err(e) => blink_linux::errno(&e),
+                                            Ok(path) => {
+                                                use std::os::unix::fs::FileTypeExt;
+                                                if std::fs::metadata(path)?.file_type().is_socket()
+                                                {
+                                                    return Err(Error::UnsupportedSyscall(number));
+                                                }
+                                                errno(111)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _ => errno(88),
                         }
                     }
                     7 => {
@@ -626,23 +772,20 @@ pub(super) fn run(
                             }
                         }
                     }
-                    40 => {
-                        let fds = process.fds.borrow();
-                        match (fds.get(&(args[0] as i32)), fds.get(&(args[1] as i32))) {
-                            (None, _) | (_, None) => errno(9),
-                            (
-                                _,
-                                Some(
-                                    Fd::Reader(_)
-                                    | Fd::Writer(_)
-                                    | Fd::Stdin
-                                    | Fd::Stdout
-                                    | Fd::Stderr,
-                                ),
-                            ) => errno(22),
-                            _ => return Err(Error::UnsupportedSyscall(number)),
+                    40 => match send_file(&process, args, stdout, stderr)? {
+                        Some(result) => {
+                            if result == errno(32) {
+                                process.pending_signals |= 1 << 12;
+                                process.signal_senders[12] = process.group;
+                            }
+                            result
                         }
-                    }
+                        None => {
+                            process.pending = Some((number, args));
+                            event = Event::Blocked;
+                            break;
+                        }
+                    },
                     16 => {
                         if process.fds.borrow().contains_key(&(args[0] as i32)) {
                             match args[1] {
@@ -705,6 +848,10 @@ pub(super) fn run(
                                     0
                                 }
                                 3 => match &fd {
+                                    Fd::Directory(_) => 0x18000,
+                                    Fd::UnixSocket { nonblock, .. } => {
+                                        2 | if *nonblock { 0x800 } else { 0 }
+                                    }
                                     Fd::Stdin | Fd::Reader(_) => 0,
                                     Fd::Stdout | Fd::Stderr | Fd::Writer(_) => 1,
                                     Fd::File {
@@ -879,7 +1026,7 @@ pub(super) fn run(
                         let fd = process.fds.borrow().get(&(args[0] as i32)).cloned();
                         match fd {
                             None => errno(9),
-                            Some(fd) => match fd.stat() {
+                            Some(fd) => match fd.stat(config.rootless_metadata) {
                                 Err(e) => blink_linux::errno(&e),
                                 Ok(stat) => {
                                     let bytes = blink_linux::stat_bytes(&stat, config.guest_arch);
@@ -1090,7 +1237,10 @@ pub(super) fn run(
                             }) {
                                 None => errno(14),
                                 Some(new) => {
-                                    if new.flags & !(4 | 0x4000000 | 0x40000000 | 0x80000000) != 0 {
+                                    if new.flags
+                                        & !(4 | 0x4000000 | 0x10000000 | 0x40000000 | 0x80000000)
+                                        != 0
+                                    {
                                         return Err(Error::UnsupportedSyscall(number));
                                     }
                                     if new.handler > 1
@@ -1181,21 +1331,50 @@ pub(super) fn run(
                                 if nr == 257 && args[0] as i32 != -100 && !path.starts_with('/') {
                                     return Err(Error::UnsupportedSyscall(number));
                                 }
-                                if flags & !(3 | 64 | 128 | 512 | 1024 | 0x8000 | 0x80000) != 0 {
+                                if flags
+                                    & !(3
+                                        | 64
+                                        | 128
+                                        | 512
+                                        | 1024
+                                        | 0x8000
+                                        | 0x10000
+                                        | 0x20000
+                                        | 0x80000)
+                                    != 0
+                                {
                                     return Err(Error::UnsupportedSyscall(number));
                                 }
+                                let existing = blink_host::path_stat(
+                                    &config.rootfs,
+                                    &process.cwd.borrow(),
+                                    std::path::Path::new(&path),
+                                    true,
+                                    config.rootless_metadata,
+                                )
+                                .ok();
                                 if flags & 3 == 3 || flags & 512 != 0 && flags & 3 == 0 {
                                     errno(22)
+                                } else if flags & (64 | 128) == (64 | 128) && existing.is_some() {
+                                    errno(17)
+                                } else if flags & 0x20000 != 0
+                                    && existing.is_some_and(|s| s.mode & 0o170000 == 0o120000)
+                                {
+                                    errno(40)
                                 } else if let Some(fd) = process.fd() {
                                     match open_file(
                                         config,
                                         &process.cwd.borrow(),
                                         &path,
                                         flags,
-                                        mode,
+                                        mode & !(process.umask.get() as u64),
+                                        &process.credentials,
                                     ) {
                                         Ok(file) => {
                                             process.fds.borrow_mut().insert(fd, file);
+                                            if flags & 0x80000 != 0 {
+                                                process.descriptor_flags.borrow_mut().insert(fd);
+                                            }
                                             fd as u64
                                         }
                                         Err(e) => blink_linux::errno(&e),
@@ -1210,6 +1389,18 @@ pub(super) fn run(
                         let fd = process.fds.borrow().get(&(args[0] as i32)).cloned();
                         match fd.as_ref() {
                             None => errno(9),
+                            Some(Fd::Directory(directory)) => {
+                                if args[2] == 1 && args[1] == 0 {
+                                    directory.borrow().position
+                                } else if args[2] == 0 && args[1] == 0 {
+                                    directory
+                                        .borrow_mut()
+                                        .rewind()
+                                        .map_or_else(|e| blink_linux::errno(&e), |_| 0)
+                                } else {
+                                    return Err(Error::UnsupportedSyscall(number));
+                                }
+                            }
                             Some(Fd::File { file, .. }) => {
                                 let seek = match args[2] {
                                     0 => {
@@ -1234,6 +1425,12 @@ pub(super) fn run(
                             _ => errno(29),
                         }
                     }
+                    280 => change_times(config, &process, args)?,
+                    92..=94 | 260 => change_owner(config, &process, nr, args)?,
+                    217 => read_directory(&process, args)?,
+                    95 => process.umask.replace(args[0] as u32 & 0o777) as u64,
+                    82 | 83 | 84 | 86 | 87 | 88 | 90 | 91 | 258 | 263 | 264 | 265 | 266 | 268
+                    | 316 => filesystem_mutation(config, &process, nr, args)?,
                     79 => {
                         let cwd = process.cwd.borrow();
                         let bytes = cwd.as_os_str().as_encoded_bytes();
@@ -1310,11 +1507,12 @@ pub(super) fn run(
                         pid as u64
                     }
                     110 => process.parent as u64,
-                    57 | 56 => {
+                    56..=58 => {
+                        let vfork = nr == 58 || (nr == 56 && args[0] == 0x4111);
                         let thread = nr == 56 && args[0] & 0x10000 != 0;
                         let flags = args[0];
                         if nr == 56
-                            && ((!thread && (flags != 17 || args[1] != 0))
+                            && ((!thread && !vfork && (flags != 17 || args[1] != 0))
                                 || (thread
                                     && (flags & 0x10f00 != 0x10f00
                                         || flags
@@ -1353,6 +1551,7 @@ pub(super) fn run(
                             errno(14)
                         } else if processes.len() + zombies.len() >= 1023
                             || (!thread
+                                && !vfork
                                 && total
                                     .checked_add(process.memory.borrow().mapped_bytes())
                                     .is_none_or(|n| n > config.max_memory))
@@ -1367,7 +1566,14 @@ pub(super) fn run(
                             child.pending_signals = 0;
                             child.signal_senders = [0; 64];
                             child.futex = None;
+                            child.futex_syscall = None;
                             child.pending = None;
+                            child.poll_deadline = None;
+                            child.vfork_wait = None;
+                            child.vfork_parent = if vfork { Some(pid) } else { None };
+                            if vfork {
+                                process.vfork_wait = Some(child_pid);
+                            }
                             if thread {
                                 child.cpu.stack(args[1]);
                                 if flags & 0x80000 != 0 {
@@ -1395,12 +1601,18 @@ pub(super) fn run(
                                     child.clear_tid = child_tid;
                                 }
                             } else {
-                                child.memory =
-                                    Rc::new(RefCell::new(process.memory.borrow().clone()));
+                                if !vfork {
+                                    child.memory =
+                                        Rc::new(RefCell::new(process.memory.borrow().clone()));
+                                    child.heap =
+                                        Rc::new(RefCell::new(process.heap.borrow().clone()));
+                                } else if nr == 56 && args[1] != 0 {
+                                    child.cpu.stack(args[1]);
+                                }
                                 child.fds = Rc::new(RefCell::new(process.fds.borrow().clone()));
                                 child.cwd = Rc::new(RefCell::new(process.cwd.borrow().clone()));
+                                child.umask = Rc::new(Cell::new(process.umask.get()));
                                 child.actions = Rc::new(RefCell::new(*process.actions.borrow()));
-                                child.heap = Rc::new(RefCell::new(process.heap.borrow().clone()));
                                 child.descriptor_flags = Rc::new(RefCell::new(
                                     process.descriptor_flags.borrow().clone(),
                                 ));
@@ -1426,6 +1638,7 @@ pub(super) fn run(
                                 Ok(v) if v != args[2] as u32 as u64 => errno(11),
                                 Ok(_) => {
                                     process.futex = Some(args[0]);
+                                    process.futex_syscall = Some(number);
                                     process.cpu.cpu().set_result(0);
                                     event = Event::Blocked;
                                     break;
@@ -1493,14 +1706,15 @@ pub(super) fn run(
                         match values {
                             Err(_) => errno(14),
                             Ok((path, argv, env)) => {
-                                match image(
+                                let loaded = image(
                                     config,
                                     std::path::Path::new(&path),
                                     &process.cwd.borrow(),
                                     &argv,
                                     &env,
                                     &process.credentials,
-                                ) {
+                                );
+                                match loaded {
                                     Ok(new) => {
                                         let other = memory_usage(processes.values());
                                         if other
@@ -1515,11 +1729,7 @@ pub(super) fn run(
                                                 new.stack,
                                             );
                                             process.memory = Rc::new(RefCell::new(new.memory));
-                                            process.executable = guest_executable(
-                                                config,
-                                                &process.cwd.borrow(),
-                                                std::path::Path::new(&path),
-                                            )?;
+                                            process.executable = new.executable;
                                             process.robust_head = 0;
                                             process.clear_tid = 0;
                                             process.heap =
@@ -1537,6 +1747,7 @@ pub(super) fn run(
                                                         .contains(number)
                                             });
                                             process.descriptor_flags.borrow_mut().clear();
+                                            release_vfork(&mut process, &mut processes);
                                             continue;
                                         }
                                     }
@@ -1649,6 +1860,8 @@ pub(super) fn run(
                             } else {
                                 match (nr, &fd) {
                                     (0, Fd::Stdin) => 0,
+                                    (0, Fd::Directory(_)) => errno(21),
+                                    (_, Fd::UnixSocket { .. }) => errno(107),
                                     (
                                         0,
                                         Fd::File {
@@ -1794,6 +2007,7 @@ pub(super) fn run(
         match event {
             Event::Exit(code) | Event::Signal(code) => {
                 let signaled = matches!(event, Event::Signal(_));
+                release_vfork(&mut process, &mut processes);
                 release_robust(&process, pid, &mut processes);
                 clear_tid(&process, &mut processes);
                 if signaled {
@@ -1840,7 +2054,7 @@ pub(super) fn run(
         if !processes.is_empty()
             && processes
                 .values()
-                .all(|p| p.pending.is_some() || p.futex.is_some())
+                .all(|p| p.pending.is_some() || p.futex.is_some() || p.vfork_wait.is_some())
         {
             // Poll cancellation without spinning when all guests wait on each other.
             std::thread::sleep(std::time::Duration::from_millis(1));
@@ -1875,6 +2089,7 @@ fn wake(
         }
         if Rc::ptr_eq(&p.memory, memory) && p.futex == Some(address) {
             p.futex = None;
+            p.futex_syscall = None;
             n += 1;
         }
     }
@@ -1898,6 +2113,7 @@ fn open_file(
     path: &str,
     flags: u64,
     mode: u64,
+    credentials: &blink_linux::Credentials,
 ) -> std::io::Result<Fd> {
     let path = blink_host::resolve_from(
         &config.rootfs,
@@ -1905,6 +2121,14 @@ fn open_file(
         std::path::Path::new(path),
         flags & 64 != 0,
     )?;
+    if path.is_dir() && flags & (3 | 64 | 512 | 1024) == 0 {
+        return Ok(Fd::Directory(Rc::new(RefCell::new(
+            blink_host::Directory::open(path, config.rootfs.clone())?,
+        ))));
+    }
+    if flags & 0x10000 != 0 && !path.is_dir() {
+        return Err(std::io::ErrorKind::NotADirectory.into());
+    }
     if path.exists() && !path.is_file() {
         return Err(std::io::Error::new(
             if path.is_dir() {
@@ -1915,6 +2139,7 @@ fn open_file(
             "only regular files are supported",
         ));
     }
+    let created = !path.exists() && flags & 64 != 0;
     let read = flags & 3 != 1;
     let write = flags & 3 != 0;
     let mut options = std::fs::OpenOptions::new();
@@ -1932,7 +2157,15 @@ fn open_file(
     }
     #[cfg(not(unix))]
     let _ = mode;
-    let file = options.open(path)?;
+    let file = options.open(&path)?;
+    if config.rootless_metadata && created {
+        blink_host::metadata::Target::File(&file).created(
+            path.parent().unwrap(),
+            credentials.euid,
+            credentials.egid,
+            mode as u32,
+        )?;
+    }
     Ok(Fd::File {
         file: Rc::new(RefCell::new(file)),
         read,
@@ -1958,14 +2191,25 @@ fn deliver_signal(process: &mut Process) -> Result<Option<i32>> {
         if action.handler == 0 || signal == 9 {
             return Ok(Some(signal as i32));
         }
-        let blocked = process.pending.take().is_some();
+        let blocked = process
+            .pending
+            .take()
+            .map(|(number, _)| number)
+            .or(process.futex_syscall.take());
         process.poll_deadline = None;
-        let futex = process.futex.take().is_some();
-        if blocked || futex {
-            process.cpu.cpu().set_result(errno(4));
-        }
+        process.futex = None;
         match &mut process.cpu {
             Engine::X86(cpu) => {
+                if let Some(number) = blocked {
+                    if action.flags & 0x10000000 != 0
+                        && matches!(number, 0 | 1 | 20 | 40 | 61 | 202)
+                    {
+                        cpu.rip = cpu.rip.wrapping_sub(2);
+                        cpu.regs[0] = number;
+                    } else {
+                        cpu.set_result(errno(4));
+                    }
+                }
                 if cpu
                     .enter_signal(
                         &mut process.memory.borrow_mut(),
@@ -2225,13 +2469,413 @@ fn poll_events(fd: Option<&Fd>, wanted: u16) -> u16 {
             let p = p.borrow();
             (if p.bytes.len() < 65536 { 4 | 256 } else { 0 }) | if p.readers == 0 { 8 } else { 0 }
         }
+        Some(Fd::UnixSocket { .. }) => 4 | 16 | 256,
         Some(Fd::Stdin) => 1 | 64,
         Some(Fd::Stdout | Fd::Stderr) => 4 | 256,
         // Linux regular files are always ready, even if the following I/O
         // will fail because the descriptor's access mode does not permit it.
-        Some(Fd::File { .. }) => 1 | 4 | 64 | 256,
+        Some(Fd::File { .. } | Fd::Directory(_)) => 1 | 4 | 64 | 256,
     };
     available & (wanted | 8 | 16 | 32)
+}
+
+fn filesystem_mutation(
+    config: &RuntimeConfig,
+    process: &Process,
+    nr: u64,
+    args: [u64; 6],
+) -> Result<u64> {
+    if nr == 91 {
+        return Ok(match process.fds.borrow().get(&(args[0] as i32)) {
+            None => errno(9),
+            Some(Fd::File { file, .. }) => blink_host::metadata::Target::File(&file.borrow())
+                .chmod(args[1] as u32, config.rootless_metadata)
+                .map_or_else(|e| blink_linux::errno(&e), |_| 0),
+            _ => return Err(Error::UnsupportedSyscall(nr)),
+        });
+    }
+    let (operation, first, second, mode, dir1, dir2) = match nr {
+        258 => (83, args[1], 0, args[2], args[0] as i32, -100),
+        263 => {
+            if args[2] & !512 != 0 {
+                return Ok(errno(22));
+            }
+            (
+                if args[2] == 512 { 84 } else { 87 },
+                args[1],
+                0,
+                0,
+                args[0] as i32,
+                -100,
+            )
+        }
+        264 | 316 => {
+            if nr == 316 && args[4] != 0 {
+                return Err(Error::UnsupportedSyscall(nr));
+            }
+            (82, args[1], args[3], 0, args[0] as i32, args[2] as i32)
+        }
+        265 => {
+            if args[4] != 0 {
+                return Err(Error::UnsupportedSyscall(nr));
+            }
+            (86, args[1], args[3], 0, args[0] as i32, args[2] as i32)
+        }
+        266 => (88, args[0], args[2], 0, -100, args[1] as i32),
+        268 => (90, args[1], 0, args[2], args[0] as i32, -100),
+        _ => (nr, args[0], args[1], args[1], -100, -100),
+    };
+    let first = match cstring(&process.memory.borrow(), first) {
+        Ok(p) => p,
+        Err(_) => return Ok(errno(14)),
+    };
+    let second = if matches!(operation, 82 | 86 | 88) {
+        match cstring(&process.memory.borrow(), second) {
+            Ok(p) => p,
+            Err(_) => return Ok(errno(14)),
+        }
+    } else {
+        String::new()
+    };
+    if (dir1 != -100 && !first.starts_with('/')) || (dir2 != -100 && !second.starts_with('/')) {
+        return Err(Error::UnsupportedSyscall(nr));
+    }
+    let cwd = process.cwd.borrow();
+    let result = (|| -> std::io::Result<()> {
+        let root = &config.rootfs;
+        if operation == 83
+            && blink_host::resolve_from(root, &cwd, std::path::Path::new(&first), false).is_ok()
+        {
+            return Err(std::io::ErrorKind::AlreadyExists.into());
+        }
+        let path = if operation == 90 {
+            blink_host::resolve_from(root, &cwd, std::path::Path::new(&first), false)?
+        } else if operation == 88 {
+            std::path::PathBuf::from(&first)
+        } else {
+            blink_host::entry_path(root, &cwd, std::path::Path::new(&first))?
+        };
+        match operation {
+            83 => {
+                let mode = mode as u32 & !process.umask.get();
+                blink_host::mkdir(
+                    &path,
+                    if config.rootless_metadata {
+                        mode | 0o700
+                    } else {
+                        mode
+                    },
+                )?;
+                if config.rootless_metadata {
+                    blink_host::metadata::Target::Path(&path).created(
+                        path.parent().unwrap(),
+                        process.credentials.euid,
+                        process.credentials.egid,
+                        mode,
+                    )?;
+                }
+                Ok(())
+            }
+            84 => std::fs::remove_dir(path),
+            87 => std::fs::remove_file(path),
+            90 => blink_host::metadata::Target::Path(&path)
+                .chmod(mode as u32, config.rootless_metadata),
+            82 | 86 | 88 => {
+                let dest = blink_host::entry_path(root, &cwd, std::path::Path::new(&second))?;
+                match operation {
+                    82 => std::fs::rename(path, dest),
+                    86 => std::fs::hard_link(path, dest),
+                    _ => blink_host::symlink(&path, &dest),
+                }
+            }
+            _ => unreachable!(),
+        }
+    })();
+    Ok(result.map_or_else(|e| blink_linux::errno(&e), |_| 0))
+}
+
+fn send_file(
+    process: &Process,
+    args: [u64; 6],
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<Option<u64>> {
+    let fds = process.fds.borrow();
+    let Some(input) = fds.get(&(args[1] as i32)) else {
+        return Ok(Some(errno(9)));
+    };
+    let Some(output) = fds.get(&(args[0] as i32)) else {
+        return Ok(Some(errno(9)));
+    };
+    let file = match input {
+        Fd::File {
+            file, read: true, ..
+        } => file,
+        Fd::File { .. } => return Ok(Some(errno(9))),
+        _ => return Ok(Some(errno(22))),
+    };
+    match output {
+        Fd::File { write: false, .. } | Fd::Reader(_) | Fd::Stdin => return Ok(Some(errno(9))),
+        Fd::File { append: true, .. } => return Ok(Some(errno(22))),
+        Fd::File { file: out, .. } if Rc::ptr_eq(file, out) => return Ok(Some(errno(22))),
+        _ => (),
+    }
+    let explicit_offset = args[2] != 0;
+    let offset = if explicit_offset {
+        let memory = process.memory.borrow();
+        if memory.check(args[2], 8, Access::Write).is_err() {
+            return Ok(Some(errno(14)));
+        }
+        match memory.load(args[2], 8) {
+            Ok(n) if n <= i64::MAX as u64 => n,
+            Ok(_) => return Ok(Some(errno(22))),
+            Err(_) => return Ok(Some(errno(14))),
+        }
+    } else {
+        match file.borrow_mut().stream_position() {
+            Ok(n) => n,
+            Err(e) => return Ok(Some(blink_linux::errno(&e))),
+        }
+    };
+    let mut count = args[3].min(65536) as usize;
+    if let Fd::Writer(pipe) = output {
+        let pipe = pipe.borrow();
+        if count > 0 && pipe.readers == 0 {
+            return Ok(Some(errno(32)));
+        }
+        let capacity = 65536 - pipe.bytes.len();
+        if count > 0 && capacity == 0 {
+            return Ok(None);
+        }
+        count = count.min(capacity);
+    }
+    let mut bytes = vec![0; count];
+    let read = match blink_host::read_at(&file.borrow(), &mut bytes, offset) {
+        Ok(n) => n,
+        Err(e) => return Ok(Some(blink_linux::errno(&e))),
+    };
+    let wrote = match output {
+        Fd::Stdout => {
+            stdout.write_all(&bytes[..read])?;
+            read
+        }
+        Fd::Stderr => {
+            stderr.write_all(&bytes[..read])?;
+            read
+        }
+        Fd::Writer(pipe) => {
+            pipe.borrow_mut().bytes.extend(&bytes[..read]);
+            read
+        }
+        Fd::File { file, .. } => match file.borrow_mut().write(&bytes[..read]) {
+            Ok(n) => n,
+            Err(e) => return Ok(Some(blink_linux::errno(&e))),
+        },
+        _ => unreachable!(),
+    };
+    let offset = offset + wrote as u64;
+    if explicit_offset {
+        process.memory.borrow_mut().store(args[2], offset, 8)?;
+    } else if let Err(e) = file.borrow_mut().seek(SeekFrom::Start(offset)) {
+        return Ok(Some(blink_linux::errno(&e)));
+    }
+    Ok(Some(wrote as u64))
+}
+
+fn release_vfork(process: &mut Process, processes: &mut BTreeMap<u32, Process>) {
+    if let Some(parent) = process.vfork_parent.take() {
+        if let Some(parent) = processes.get_mut(&parent) {
+            parent.vfork_wait = None;
+        }
+    }
+}
+
+fn read_directory(process: &Process, args: [u64; 6]) -> Result<u64> {
+    let fds = process.fds.borrow();
+    let directory = match fds.get(&(args[0] as i32)) {
+        None => return Ok(errno(9)),
+        Some(Fd::Directory(d)) => d,
+        _ => return Ok(errno(20)),
+    };
+    let count = args[2].min(65536) as usize;
+    if process
+        .memory
+        .borrow()
+        .check(args[1], count, Access::Write)
+        .is_err()
+    {
+        return Ok(errno(14));
+    }
+    let mut directory = directory.borrow_mut();
+    let mut bytes = Vec::new();
+    loop {
+        let entry = match directory.peek() {
+            Ok(Some(e)) => e,
+            Ok(None) => break,
+            Err(e) => {
+                if bytes.is_empty() {
+                    return Ok(blink_linux::errno(&e));
+                }
+                break;
+            }
+        };
+        let length = (19 + entry.name.len() + 1 + 7) & !7;
+        if bytes.len() + length > count {
+            if bytes.is_empty() {
+                return Ok(errno(22));
+            }
+            break;
+        }
+        let offset = bytes.len();
+        bytes.resize(offset + length, 0);
+        bytes[offset..offset + 8].copy_from_slice(&entry.inode.to_le_bytes());
+        bytes[offset + 8..offset + 16].copy_from_slice(&(directory.position + 1).to_le_bytes());
+        bytes[offset + 16..offset + 18].copy_from_slice(&(length as u16).to_le_bytes());
+        bytes[offset + 18] = entry.kind;
+        bytes[offset + 19..offset + 19 + entry.name.len()].copy_from_slice(&entry.name);
+        directory.advance();
+    }
+    process.memory.borrow_mut().write(args[1], &bytes)?;
+    Ok(bytes.len() as u64)
+}
+
+fn change_owner(config: &RuntimeConfig, process: &Process, nr: u64, args: [u64; 6]) -> Result<u64> {
+    if !config.rootless_metadata {
+        return Err(Error::UnsupportedSyscall(nr));
+    }
+    let (uid, gid) = if nr == 260 {
+        (args[2], args[3])
+    } else {
+        (args[1], args[2])
+    };
+    let result = if nr == 93 {
+        let fds = process.fds.borrow();
+        match fds.get(&(args[0] as i32)) {
+            None => return Ok(errno(9)),
+            Some(Fd::File { file, .. }) => blink_host::metadata::Target::File(&file.borrow())
+                .chown(uid as u32, gid as u32, true),
+            Some(Fd::Directory(d)) => blink_host::metadata::Target::File(&d.borrow().file)
+                .chown(uid as u32, gid as u32, true),
+            _ => return Err(Error::UnsupportedSyscall(nr)),
+        }
+    } else {
+        let pointer = if nr == 260 { args[1] } else { args[0] };
+        let path = match cstring(&process.memory.borrow(), pointer) {
+            Ok(p) => p,
+            Err(_) => return Ok(errno(14)),
+        };
+        if nr == 260 && (args[4] & !256 != 0 || (args[0] as i32 != -100 && !path.starts_with('/')))
+        {
+            return Err(Error::UnsupportedSyscall(nr));
+        }
+        let nofollow = nr == 94 || (nr == 260 && args[4] & 256 != 0);
+        let path = if nofollow {
+            blink_host::entry_path(
+                &config.rootfs,
+                &process.cwd.borrow(),
+                std::path::Path::new(&path),
+            )
+        } else {
+            blink_host::resolve_from(
+                &config.rootfs,
+                &process.cwd.borrow(),
+                std::path::Path::new(&path),
+                false,
+            )
+        };
+        match path {
+            Ok(p) => blink_host::metadata::Target::Path(&p).chown(uid as u32, gid as u32, true),
+            Err(e) => Err(e),
+        }
+    };
+    Ok(result.map_or_else(|e| blink_linux::errno(&e), |_| 0))
+}
+
+fn change_times(config: &RuntimeConfig, process: &Process, args: [u64; 6]) -> Result<u64> {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    if args[3] & !256 != 0 {
+        return Err(Error::UnsupportedSyscall(280));
+    }
+    let mut times = std::fs::FileTimes::new();
+    let now = SystemTime::now();
+    for n in 0..2 {
+        let value = if args[2] == 0 {
+            Some(now)
+        } else {
+            let memory = process.memory.borrow();
+            let address = match args[2].checked_add(n * 16) {
+                Some(a) => a,
+                None => return Ok(errno(14)),
+            };
+            let (seconds, nanos) = match (memory.load(address, 8), memory.load(address + 8, 8)) {
+                (Ok(s), Ok(ns)) => (s as i64, ns),
+                _ => return Ok(errno(14)),
+            };
+            match nanos {
+                1073741822 => None,
+                1073741823 => Some(now),
+                0..=999999999 => {
+                    let seconds = if seconds >= 0 {
+                        UNIX_EPOCH.checked_add(Duration::from_secs(seconds as u64))
+                    } else {
+                        UNIX_EPOCH.checked_sub(Duration::from_secs(seconds.unsigned_abs()))
+                    };
+                    match seconds.and_then(|s| s.checked_add(Duration::from_nanos(nanos))) {
+                        Some(s) => Some(s),
+                        None => return Ok(errno(22)),
+                    }
+                }
+                _ => return Ok(errno(22)),
+            }
+        };
+        if let Some(value) = value {
+            times = if n == 0 {
+                times.set_accessed(value)
+            } else {
+                times.set_modified(value)
+            };
+        }
+    }
+    let result = if args[1] == 0 {
+        match process.fds.borrow().get(&(args[0] as i32)) {
+            None => return Ok(errno(9)),
+            Some(Fd::File { file, .. }) => file.borrow().set_times(times),
+            Some(Fd::Directory(d)) => d.borrow().file.set_times(times),
+            _ => return Err(Error::UnsupportedSyscall(280)),
+        }
+    } else {
+        let path = match cstring(&process.memory.borrow(), args[1]) {
+            Ok(p) => p,
+            Err(_) => return Ok(errno(14)),
+        };
+        if args[0] as i32 != -100 && !path.starts_with('/') {
+            return Err(Error::UnsupportedSyscall(280));
+        }
+        let path = if args[3] & 256 != 0 {
+            blink_host::entry_path(
+                &config.rootfs,
+                &process.cwd.borrow(),
+                std::path::Path::new(&path),
+            )
+        } else {
+            blink_host::resolve_from(
+                &config.rootfs,
+                &process.cwd.borrow(),
+                std::path::Path::new(&path),
+                false,
+            )
+        };
+        match path {
+            Err(e) => Err(e),
+            Ok(path) => {
+                if std::fs::symlink_metadata(&path)?.file_type().is_symlink() {
+                    return Err(Error::UnsupportedSyscall(280));
+                }
+                std::fs::File::open(path).and_then(|f| f.set_times(times))
+            }
+        }
+    };
+    Ok(result.map_or_else(|e| blink_linux::errno(&e), |_| 0))
 }
 
 #[cfg(test)]

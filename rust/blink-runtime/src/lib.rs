@@ -21,6 +21,8 @@ pub struct RuntimeConfig {
     pub max_image_size: usize,
     pub max_instructions: u64,
     pub trace: bool,
+    /// Persist guest owner/mode attributes without changing host ownership.
+    pub rootless_metadata: bool,
 }
 impl RuntimeConfig {
     pub fn new(rootfs: impl Into<PathBuf>, guest_arch: GuestArch) -> Self {
@@ -31,6 +33,7 @@ impl RuntimeConfig {
             max_image_size: 32 * 1024 * 1024,
             max_instructions: 100_000_000,
             trace: false,
+            rootless_metadata: false,
         }
     }
 }

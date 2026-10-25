@@ -8,6 +8,11 @@ pub struct Pipe {
     pub writers: usize,
 }
 pub enum Fd {
+    Directory(Rc<RefCell<blink_host::Directory>>),
+    UnixSocket {
+        inode: u64,
+        nonblock: bool,
+    },
     File {
         file: Rc<RefCell<std::fs::File>>,
         read: bool,
@@ -24,6 +29,11 @@ pub enum Fd {
 impl Clone for Fd {
     fn clone(&self) -> Self {
         match self {
+            Self::Directory(d) => Self::Directory(d.clone()),
+            Self::UnixSocket { inode, nonblock } => Self::UnixSocket {
+                inode: *inode,
+                nonblock: *nonblock,
+            },
             Self::File {
                 file,
                 read,
@@ -80,6 +90,9 @@ pub fn errno(error: &std::io::Error) -> u64 {
         NotFound => 2,
         PermissionDenied => 13,
         AlreadyExists => 17,
+        DirectoryNotEmpty => 39,
+        CrossesDevices => 18,
+        TooManyLinks => 31,
         InvalidInput | InvalidData => 22,
         NotADirectory => 20,
         IsADirectory => 21,
@@ -87,6 +100,7 @@ pub fn errno(error: &std::io::Error) -> u64 {
         ReadOnlyFilesystem => 30,
         Interrupted => 4,
         WouldBlock => 11,
+        Unsupported => 38,
         _ => 5,
     };
     (-n) as u64
@@ -102,13 +116,19 @@ pub struct SignalAction {
 pub const UNBLOCKABLE: u64 = (1 << 8) | (1 << 18);
 
 impl Fd {
-    pub fn stat(&self) -> std::io::Result<blink_host::FileStat> {
+    pub fn stat(&self, rootless: bool) -> std::io::Result<blink_host::FileStat> {
         use blink_host::FileStat;
         match self {
-            Self::File { file, .. } => blink_host::file_stat(&file.borrow().metadata()?),
+            Self::File { file, .. } => {
+                blink_host::metadata::Target::File(&file.borrow()).stat(rootless)
+            }
+            Self::Directory(d) => {
+                blink_host::metadata::Target::File(&d.borrow().file).stat(rootless)
+            }
             _ => Ok(FileStat {
                 dev: 0xffff_ff00,
                 ino: match self {
+                    Self::UnixSocket { inode, .. } => *inode,
                     Self::Stdin => 1,
                     Self::Stdout => 2,
                     Self::Stderr => 3,
@@ -116,7 +136,11 @@ impl Fd {
                     _ => unreachable!(),
                 },
                 nlink: 1,
-                mode: 0o010600,
+                mode: if matches!(self, Self::UnixSocket { .. }) {
+                    0o140600
+                } else {
+                    0o010600
+                },
                 blksize: 4096,
                 ..Default::default()
             }),

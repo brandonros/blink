@@ -17,9 +17,11 @@ cargo run -p blink-cli -- --root / --arch x86_64 /path/to/static-guest
 python3 rust/differential.py --c-blink /path/to/frozen/c-blink
 python3 rust/asm-regressions.py
 python3 rust/alpine-smoke.py --root /path/to/extracted/alpine-amd64
+python3 rust/builder-smoke.py --root /path/to/alpine --builder /path/to/linux-oci-builder
+python3 rust/rootless-smoke.py --root /path/to/alpine
 ```
 
-The CLI also accepts `--cwd`, `--timeout-ms`, `--max-instructions`, and `--trace`. With no
+The CLI also accepts `--cwd`, `--timeout-ms`, `--max-instructions`, `--rootless-metadata`, and `--trace`. With no
 `--root`, relative programs resolve from the host working directory; with an
 explicit root, the default guest cwd is `/`.
 
@@ -50,16 +52,26 @@ Implemented slices:
   shifts/rotates, conditional moves, atomics under cooperative scheduling, and FS.
   A limited SSE integer/move subset supports the tested libc and musl paths.
 - A small AArch64 integer/load-store/branch subset and TPIDR_EL0.
-- Guest fork, exec, wait, pipes, dup/close, IDs, exit and thread-group exit.
+- Guest fork/vfork, exec (including bounded shebang chains), wait, pipes,
+  dup/close, IDs, exit and thread-group exit. vfork shares guest memory and
+  suspends only the guest caller until child exec/exit.
 - A constrained clone thread model sharing memory, cwd, descriptors and signal
   dispositions, TLS initialization, parent/child TID writes, clear-child-TID and
   futex WAIT/WAKE. Other clone/futex variants return explicit errors.
 - AMD64 rt_sigaction/procmask, queued kill delivery, integer/XMM signal frames,
-  handler-edited ucontext, and rt_sigreturn. SIGKILL cannot be blocked.
+  handler-edited ucontext, rt_sigreturn, and SA_RESTART for supported blocking
+  I/O/wait/futex calls. SIGKILL cannot be blocked.
 - Rooted regular-file open/read/write/seek, cwd, guest-rooted symlink resolution,
   shared open-file offsets, pread/writev, stat layouts, access/readlink, descriptor
   flags/duplication/close-on-exec, poll readiness, and bounded pipe vector writes.
-  Regular-file metadata still comes from the host.
+  sendfile, directories/getdents64, mkdir/link/symlink/rename/unlink/chmod,
+  per-process umask, and regular-file/directory timestamp updates.
+- Optional persistent rootless owner/mode attributes (`RuntimeConfig::rootless_metadata`),
+  with hardlink/rename/open-descriptor identity, setgid-directory inheritance,
+  and chown set-ID clearing. Host ownership stays unchanged. Attribute payloads
+  match C on Darwin; Linux uses the required `user.` namespace.
+- Unconnected guest Unix-domain sockets can resolve pathname connect attempts
+  and report missing/non-socket targets. No host socket is opened.
 - Bounded capture, timeout/cancellation (including blocked pipes/futexes), and
   explicit exit/signal/timeout/cancel/budget outcomes separate from engine errors.
 
@@ -75,9 +87,15 @@ with external exec, file redirection/append, and command substitution. The smoke
 harness uses disposable root copies and also passes with the C interpreter.
 Static glibc hello passes; this host's dynamic glibc refuses the conservative
 CPUID capability set. Package managers, Node, Bun, and builder images are unproven.
-Broad ISA/SIMD/FPU coverage, shared file mappings, directory operations, general
-VFS/procfs/rootless metadata, networking, and JIT remain. ARM64 signal frames,
-threaded exec, signal altstacks/restart, queued realtime signals, job control,
+
+The six small builder examples `00-hello` through `05-environment` pass every
+RUN and CMD via `builder-smoke.py`, including gzip/tar round trip and SHA-256.
+This harness reads their original Dockerfiles, retains a disposable root between
+steps, and checks expected output. It does not assemble/export an OCI image or
+replace the 26 agent-platform checkpoint receipts.
+Broad ISA/SIMD/FPU coverage, shared file mappings, full directory-relative *at
+operations, general VFS/procfs, networking, and JIT remain. ARM64 signal frames,
+threaded exec, signal altstacks, queued realtime signals, job control,
 automatic SIGCHLD notifications, and handlers for synchronous faults remain.
 No image-build checkpoint or verifier has passed with Rust.
 
@@ -85,8 +103,12 @@ Memory limits count unique mapped guest pages across threads and forked processe
 allocator overhead, ELF input buffers, and host sinks are separate. Guest stdin
 is EOF. Caller-provided output sinks and host regular-file I/O can block; those
 host operations are not yet interruptible. Rooted paths are build bookkeeping,
-not a security boundary against pathname races. File modes currently use host
-permissions/umask; ownership and persistent inode metadata are not emulated.
+not a security boundary against pathname races. Without rootless metadata mode, file modes/ownership come from the host and
+chown is unsupported. Rootless mode is privileged build bookkeeping, not a
+permission/capability enforcement model. It retains host read/write access when
+guest mode is 000. Xattr failures/corruption are errors. Linux symlink ownership
+changes are not supported by user xattrs; symlink timestamps and guest xattr
+syscalls remain. Rewinding a renamed open directory still uses its original path.
 File close uses Rust's Drop and does not yet surface late host close errors.
 Non-UTF8 exec/path strings and overlapping ELF segment pages are not implemented.
 No macOS execution or broader host compatibility has been validated yet.
@@ -98,7 +120,10 @@ fetches bytes incrementally from checked executable memory, stopping once an
 instruction decodes. It never unconditionally reads 15 guest bytes. Execution
 semantics remain ours. The adapter corrects yaxpeax-x86 2.2.0's unconditional
 64-bit destination for MOVSXD without REX.W, exposed by Blink's native assembly
-regression and covered by a focused test.
+regression and covered by a focused test. The adapter also corrects 32-bit BSWAP without
+REX.W: the decoder reports a qword register, which caused musl strstr to return
+false matches and tar to strip valid filename prefixes. A unit test and native
+compiled-C comparison cover the correction.
 
 AArch64 uses yaxpeax-arm 0.5.0 and yaxpeax-arch 0.3.3 as test references, including
 100,000 deterministic encoding probes. This is not a complete coverage audit.
@@ -106,6 +131,8 @@ The three yaxpeax packages are 0BSD. Formatting/serde/default features are off.
 The x86 decoder and shared reader contain unsafe internals; our adapter supplies
 bounded slices to their safe interfaces. The A64 decoder file has no explicit
 unsafe blocks, but its dependencies do. Our own crates forbid unsafe code.
+The host xattr layer uses pinned xattr 1.6.1 and its Rustix dependencies through
+safe standard-file/path interfaces; those dependencies contain unsafe internals.
 A full dependency soundness review and SIMD/atomic/system-register coverage
 matrix remain before broadening advertised capabilities.
 
@@ -118,8 +145,9 @@ experimental runtime, including PR #218 changes. Builder checkout:
 The preexisting C executable, config, clean-build log and hash manifest are in
 `/workspace/work/blink-baseline`. The clean reference build uses the separate
 `o/rust-reference` directory. On this Linux x86_64 host, Rust, C interpreter and
-native Linux pass all eight original differential fixtures. A ninth descriptor fixture
-passes Rust/native and exposes C returning extra F_GETFL flags on a CLOEXEC pipe. C JIT fails the pipe/fork
+native Linux pass the original fixtures plus new vfork, filesystem/sendfile,
+and signal-restart comparisons. All 12 fixtures pass Rust/native; the descriptor
+fixture exposes C returning extra F_GETFL flags on a CLOEXEC pipe. C JIT fails the pipe/fork
 fixture and crashes during the exec fixture, including after a clean rebuild.
 Those failures remain visible; C is a comparison target, not an infallible oracle.
 The Alpine OCI layer used for smoke tests is

@@ -11,6 +11,7 @@ fn field(bytes: &[u8], off: usize, n: usize) -> Result<u64> {
     Ok(u64::from_le_bytes(b))
 }
 pub struct Image {
+    pub executable: std::path::PathBuf,
     pub memory: Memory,
     pub entry: u64,
     pub stack: u64,
@@ -252,6 +253,7 @@ pub fn load(
         memory.store(sp + n as u64 * 8, *w, 8)?;
     }
     Ok(Image {
+        executable: std::path::PathBuf::new(),
         memory,
         entry,
         stack: sp,

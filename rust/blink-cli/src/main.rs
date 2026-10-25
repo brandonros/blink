@@ -19,6 +19,7 @@ fn run() -> blink::Result<i32> {
     let mut timeout = None;
     let mut budget = None;
     let mut trace = false;
+    let mut rootless_metadata = false;
     let program = loop {
         match args.next().as_deref() {
             Some("--help" | "-h") => {
@@ -26,6 +27,7 @@ fn run() -> blink::Result<i32> {
                 return Ok(0);
             }
             Some("--trace") => trace = true,
+            Some("--rootless-metadata") => rootless_metadata = true,
             Some("--root") => {
                 root = args.next().ok_or_else(usage)?;
                 root_set = true;
@@ -61,6 +63,7 @@ fn run() -> blink::Result<i32> {
     };
     let mut config = RuntimeConfig::new(root, arch);
     config.trace = trace;
+    config.rootless_metadata = rootless_metadata;
     if let Some(b) = budget {
         config.max_instructions = b;
     }

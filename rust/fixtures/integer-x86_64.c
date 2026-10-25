@@ -10,6 +10,7 @@ __attribute__((noreturn)) void _start(void) {
     u64 x=inputs[0], y=inputs[1], divisor=inputs[2];
     u64 quotient=y/divisor, remainder=y%divisor;
     int fail=quotient*divisor+remainder!=y;
+    fail |= __builtin_bswap32((unsigned)inputs[0]) != 0xf0debc9au;
     for (u64 i=0;i<257;i++) {
         x = ((x << 7) | (x >> 57)) ^ (y+i);
         y = y*inputs[3]+x;

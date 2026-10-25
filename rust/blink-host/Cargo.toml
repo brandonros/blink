@@ -9,3 +9,4 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+xattr = "1.6.1"
