@@ -18,12 +18,14 @@ fn run() -> blink::Result<i32> {
     let mut arch = GuestArch::X86_64;
     let mut timeout = None;
     let mut budget = None;
+    let mut trace = false;
     let program = loop {
         match args.next().as_deref() {
             Some("--help" | "-h") => {
                 println!("{USAGE}");
                 return Ok(0);
             }
+            Some("--trace") => trace = true,
             Some("--root") => {
                 root = args.next().ok_or_else(usage)?;
                 root_set = true;
@@ -58,6 +60,7 @@ fn run() -> blink::Result<i32> {
         }
     };
     let mut config = RuntimeConfig::new(root, arch);
+    config.trace = trace;
     if let Some(b) = budget {
         config.max_instructions = b;
     }

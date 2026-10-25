@@ -20,6 +20,7 @@ pub struct RuntimeConfig {
     pub max_memory: usize,
     pub max_image_size: usize,
     pub max_instructions: u64,
+    pub trace: bool,
 }
 impl RuntimeConfig {
     pub fn new(rootfs: impl Into<PathBuf>, guest_arch: GuestArch) -> Self {
@@ -29,6 +30,7 @@ impl RuntimeConfig {
             max_memory: 64 * 1024 * 1024,
             max_image_size: 32 * 1024 * 1024,
             max_instructions: 100_000_000,
+            trace: false,
         }
     }
 }
@@ -46,6 +48,8 @@ impl CancellationToken {
 pub struct Command {
     pub program: PathBuf,
     pub cwd: PathBuf,
+    pub uid: u32,
+    pub gid: u32,
     pub args: Vec<String>,
     pub env: Vec<String>,
     pub timeout: Option<Duration>,
@@ -56,11 +60,21 @@ impl Command {
         Self {
             program: program.into(),
             cwd: PathBuf::from("/"),
+            uid: 0,
+            gid: 0,
             args: Vec::new(),
             env: Vec::new(),
             timeout: None,
             cancellation: CancellationToken::default(),
         }
+    }
+    pub fn uid(mut self, uid: u32) -> Self {
+        self.uid = uid;
+        self
+    }
+    pub fn gid(mut self, gid: u32) -> Self {
+        self.gid = gid;
+        self
     }
     pub fn cwd(mut self, path: impl Into<PathBuf>) -> Self {
         self.cwd = path.into();

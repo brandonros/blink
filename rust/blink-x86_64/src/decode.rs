@@ -7,6 +7,7 @@ use yaxpeax_x86::long_mode::{
 };
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Value {
+    Vector(usize),
     Register {
         index: usize,
         width: usize,
@@ -23,6 +24,7 @@ impl Value {
         match self {
             Self::Register { width, .. } | Self::Memory { width, .. } => width,
             Self::Immediate(_) => 8,
+            Self::Vector(_) => 16,
         }
     }
 }
@@ -48,6 +50,9 @@ pub(super) fn instruction(memory: &Memory, pc: u64) -> Result<(Instruction, u64)
 fn register(reg: RegSpec) -> Option<Value> {
     let class = reg.class();
     let num = reg.num() as usize;
+    if class == register_class::X && num < 16 {
+        return Some(Value::Vector(num));
+    }
     if ![
         register_class::Q,
         register_class::D,
@@ -122,7 +127,13 @@ pub(super) fn operand(
         Operand::ImmediateU32 { imm } => return Ok(Value::Immediate(imm as u64)),
         Operand::ImmediateI64 { imm } => return Ok(Value::Immediate(imm as u64)),
         Operand::ImmediateU64 { imm } => return Ok(Value::Immediate(imm)),
-        Operand::AbsoluteU32 { addr } => addr as u64,
+        Operand::AbsoluteU32 { addr } => {
+            if i.prefixes.address_size() {
+                addr as u64
+            } else {
+                addr as i32 as i64 as u64
+            }
+        }
         Operand::AbsoluteU64 { addr } => addr,
         Operand::MemDeref { base } => address_reg(cpu, base, next).ok_or_else(bad)?,
         Operand::Disp { base, disp } => address_reg(cpu, base, next)
@@ -181,7 +192,7 @@ pub(super) fn operand(
     } else {
         i.mem_size().and_then(|s| s.bytes_size()).ok_or_else(bad)? as usize
     };
-    if !matches!(width, 1 | 2 | 4 | 8) {
+    if !matches!(width, 1 | 2 | 4 | 8 | 16) {
         return Err(bad());
     }
     Ok(Value::Memory {

@@ -10,6 +10,8 @@ pub struct X86 {
     pub rip: u64,
     pub flags: u64,
     pub fs_base: u64,
+    pub xmm: [[u8; 16]; 16],
+    pub ticks: u64,
 }
 fn mask(w: usize) -> u64 {
     if w == 8 {
@@ -28,6 +30,8 @@ impl X86 {
             rip: entry,
             flags: 2,
             fs_base: 0,
+            xmm: [[0; 16]; 16],
+            ticks: 0,
         };
         c.regs[4] = stack;
         c
@@ -35,6 +39,12 @@ impl X86 {
     fn read(&self, m: &Memory, v: Value) -> Result<u64> {
         Ok(match v {
             Value::Immediate(v) => v,
+            Value::Vector(_) => {
+                return Err(Error::UnsupportedInstruction {
+                    pc: self.rip,
+                    encoding: 0,
+                })
+            }
             Value::Register {
                 index,
                 width,
@@ -63,6 +73,31 @@ impl X86 {
                 pc: self.rip,
                 encoding: 0,
             }),
+        }
+    }
+    fn vector(&self, m: &Memory, value: Value) -> Result<[u8; 16]> {
+        let mut bytes = [0; 16];
+        match value {
+            Value::Vector(i) => bytes = self.xmm[i],
+            Value::Memory { address, width } => {
+                m.read(address, &mut bytes[..width], blink_core::Access::Read)?
+            }
+            _ => {
+                let v = self.read(m, value)?;
+                let n = value.width().min(8);
+                bytes[..n].copy_from_slice(&v.to_le_bytes()[..n]);
+            }
+        }
+        Ok(bytes)
+    }
+    fn write_vector(&mut self, m: &mut Memory, dst: Value, bytes: [u8; 16]) -> Result<()> {
+        match dst {
+            Value::Vector(i) => {
+                self.xmm[i] = bytes;
+                Ok(())
+            }
+            Value::Memory { address, width } => m.write(address, &bytes[..width]),
+            _ => self.write(m, dst, u64::from_le_bytes(bytes[..8].try_into().unwrap())),
         }
     }
     fn arithmetic(&mut self, a: u64, b: u64, w: usize, sub: bool, carry: bool) -> u64 {
@@ -139,6 +174,9 @@ impl X86 {
     }
 }
 impl Cpu for X86 {
+    fn set_ticks(&mut self, ticks: u64) {
+        self.ticks = ticks;
+    }
     fn pc(&self) -> u64 {
         self.rip
     }
@@ -170,6 +208,274 @@ impl Cpu for X86 {
         };
         self.rip = next;
         match op {
+            Op::MOVHPS | Op::MOVHPD | Op::MOVLPS | Op::MOVLPD | Op::MOVHLPS | Op::MOVLHPS => {
+                let dst = a.ok_or_else(bad)?;
+                let src = b.ok_or_else(bad)?;
+                let bytes = self.vector(m, src)?;
+                let high = matches!(op, Op::MOVHPS | Op::MOVHPD | Op::MOVLHPS);
+                if matches!(dst, Value::Memory { .. }) {
+                    let mut out = [0; 16];
+                    out[..8].copy_from_slice(&bytes[if high { 8..16 } else { 0..8 }]);
+                    self.write_vector(m, dst, out)?;
+                } else {
+                    let mut out = self.vector(m, dst)?;
+                    let source = if op == Op::MOVHLPS { 8..16 } else { 0..8 };
+                    out[if high { 8..16 } else { 0..8 }].copy_from_slice(&bytes[source]);
+                    self.write_vector(m, dst, out)?;
+                }
+            }
+            Op::MOVD
+            | Op::MOVQ
+            | Op::MOVDQA
+            | Op::MOVDQU
+            | Op::MOVAPS
+            | Op::MOVUPS
+            | Op::MOVAPD
+            | Op::MOVUPD
+            | Op::MOVSS
+            | Op::MOVSD => {
+                let dst = a.ok_or_else(bad)?;
+                let src = b.ok_or_else(bad)?;
+                if matches!(op, Op::MOVDQA | Op::MOVAPS | Op::MOVAPD) {
+                    for value in [dst, src] {
+                        if let Value::Memory { address, .. } = value {
+                            if address & 15 != 0 {
+                                return Err(Error::MemoryFault {
+                                    address,
+                                    access: blink_core::Access::Read,
+                                });
+                            }
+                        }
+                    }
+                }
+                let mut bytes = self.vector(m, src)?;
+                let width = match op {
+                    Op::MOVD | Op::MOVSS => 4,
+                    Op::MOVQ | Op::MOVSD => 8,
+                    _ => 16,
+                };
+                if width < 16 {
+                    let old = if matches!(op, Op::MOVSS | Op::MOVSD)
+                        && matches!(src, Value::Vector(_))
+                        && matches!(dst, Value::Vector(_))
+                    {
+                        self.vector(m, dst)?
+                    } else {
+                        [0; 16]
+                    };
+                    bytes[width..].copy_from_slice(&old[width..]);
+                }
+                self.write_vector(m, dst, bytes)?;
+            }
+            Op::PMINUB
+            | Op::PMAXUB
+            | Op::PXOR
+            | Op::XORPS
+            | Op::XORPD
+            | Op::PAND
+            | Op::PANDN
+            | Op::POR
+            | Op::PCMPEQB
+            | Op::PCMPEQD
+            | Op::PCMPEQQ
+            | Op::PADDB
+            | Op::PADDW
+            | Op::PSUBB
+            | Op::PSUBW
+            | Op::PADDQ
+            | Op::PADDD
+            | Op::PSUBQ
+            | Op::PSUBD => {
+                let dst = a.ok_or_else(bad)?;
+                let left = self.vector(m, dst)?;
+                let right = self.vector(m, b.ok_or_else(bad)?)?;
+                let mut out = [0; 16];
+                match op {
+                    Op::PCMPEQB => {
+                        for n in 0..16 {
+                            out[n] = if left[n] == right[n] { 255 } else { 0 };
+                        }
+                    }
+                    Op::PCMPEQD | Op::PCMPEQQ => {
+                        let lane = if op == Op::PCMPEQD { 4 } else { 8 };
+                        for n in (0..16).step_by(lane) {
+                            out[n..n + lane].fill(if left[n..n + lane] == right[n..n + lane] {
+                                255
+                            } else {
+                                0
+                            });
+                        }
+                    }
+                    Op::PADDB
+                    | Op::PADDW
+                    | Op::PSUBB
+                    | Op::PSUBW
+                    | Op::PADDD
+                    | Op::PSUBD
+                    | Op::PADDQ
+                    | Op::PSUBQ => {
+                        let lane = if matches!(op, Op::PADDB | Op::PSUBB) {
+                            1
+                        } else if matches!(op, Op::PADDW | Op::PSUBW) {
+                            2
+                        } else if matches!(op, Op::PADDD | Op::PSUBD) {
+                            4
+                        } else {
+                            8
+                        };
+                        for n in (0..16).step_by(lane) {
+                            let mut l = [0; 8];
+                            let mut r = [0; 8];
+                            l[..lane].copy_from_slice(&left[n..n + lane]);
+                            r[..lane].copy_from_slice(&right[n..n + lane]);
+                            let l = u64::from_le_bytes(l);
+                            let r = u64::from_le_bytes(r);
+                            let v = if matches!(op, Op::PADDB | Op::PADDW | Op::PADDD | Op::PADDQ) {
+                                l.wrapping_add(r)
+                            } else {
+                                l.wrapping_sub(r)
+                            };
+                            out[n..n + lane].copy_from_slice(&v.to_le_bytes()[..lane]);
+                        }
+                    }
+                    _ => {
+                        for n in 0..16 {
+                            out[n] = match op {
+                                Op::PMINUB => left[n].min(right[n]),
+                                Op::PMAXUB => left[n].max(right[n]),
+                                Op::PAND => left[n] & right[n],
+                                Op::PANDN => !left[n] & right[n],
+                                Op::POR => left[n] | right[n],
+                                _ => left[n] ^ right[n],
+                            };
+                        }
+                    }
+                }
+                self.write_vector(m, dst, out)?;
+            }
+            Op::PUNPCKLBW
+            | Op::PUNPCKLWD
+            | Op::PUNPCKHBW
+            | Op::PUNPCKHWD
+            | Op::PUNPCKLDQ
+            | Op::PUNPCKLQDQ
+            | Op::PUNPCKHDQ
+            | Op::PUNPCKHQDQ => {
+                let dst = a.ok_or_else(bad)?;
+                let left = self.vector(m, dst)?;
+                let right = self.vector(m, b.ok_or_else(bad)?)?;
+                let lane = if matches!(op, Op::PUNPCKLBW | Op::PUNPCKHBW) {
+                    1
+                } else if matches!(op, Op::PUNPCKLWD | Op::PUNPCKHWD) {
+                    2
+                } else if matches!(op, Op::PUNPCKLDQ | Op::PUNPCKHDQ) {
+                    4
+                } else {
+                    8
+                };
+                let start = if matches!(
+                    op,
+                    Op::PUNPCKHBW | Op::PUNPCKHWD | Op::PUNPCKHDQ | Op::PUNPCKHQDQ
+                ) {
+                    8
+                } else {
+                    0
+                };
+                let mut out = [0; 16];
+                for n in 0..8 / lane {
+                    out[n * lane * 2..n * lane * 2 + lane]
+                        .copy_from_slice(&left[start + n * lane..start + n * lane + lane]);
+                    out[n * lane * 2 + lane..n * lane * 2 + lane * 2]
+                        .copy_from_slice(&right[start + n * lane..start + n * lane + lane]);
+                }
+                self.write_vector(m, dst, out)?;
+            }
+            Op::PSHUFD => {
+                let src = self.vector(m, b.ok_or_else(bad)?)?;
+                let imm = self.read(m, c.ok_or_else(bad)?)?;
+                let mut out = [0; 16];
+                for n in 0..4 {
+                    let index = ((imm >> (n * 2)) & 3) as usize;
+                    out[n * 4..n * 4 + 4].copy_from_slice(&src[index * 4..index * 4 + 4]);
+                }
+                self.write_vector(m, a.ok_or_else(bad)?, out)?;
+            }
+            Op::PSLLDQ | Op::PSRLDQ => {
+                let dst = a.ok_or_else(bad)?;
+                let src = self.vector(m, dst)?;
+                let count = self.read(m, b.ok_or_else(bad)?)?.min(16) as usize;
+                let mut out = [0; 16];
+                if op == Op::PSLLDQ {
+                    out[count..].copy_from_slice(&src[..16 - count]);
+                } else {
+                    out[..16 - count].copy_from_slice(&src[count..]);
+                }
+                self.write_vector(m, dst, out)?;
+            }
+            Op::PSLLQ | Op::PSRLQ => {
+                let dst = a.ok_or_else(bad)?;
+                let src = self.vector(m, dst)?;
+                let raw = self.vector(m, b.ok_or_else(bad)?)?;
+                let count = u64::from_le_bytes(raw[..8].try_into().unwrap());
+                let mut out = [0; 16];
+                for n in [0, 8] {
+                    let value = u64::from_le_bytes(src[n..n + 8].try_into().unwrap());
+                    let result = if count >= 64 {
+                        0
+                    } else if op == Op::PSLLQ {
+                        value << count
+                    } else {
+                        value >> count
+                    };
+                    out[n..n + 8].copy_from_slice(&result.to_le_bytes());
+                }
+                self.write_vector(m, dst, out)?;
+            }
+            Op::PMOVMSKB => {
+                let src = self.vector(m, b.ok_or_else(bad)?)?;
+                let mut bits = 0;
+                for (n, v) in src.iter().enumerate() {
+                    bits |= ((v >> 7) as u64) << n;
+                }
+                self.write(m, a.ok_or_else(bad)?, bits)?;
+            }
+            Op::MOVS | Op::STOS | Op::LODS | Op::CMPS | Op::SCAS => {
+                let repeated = ins.prefixes.rep_any();
+                let address_width = if ins.prefixes.address_size() { 4 } else { 8 };
+                let count = self.regs[1] & mask(address_width);
+                if !repeated || count != 0 {
+                    let dst = a.ok_or_else(bad)?;
+                    let src = b.ok_or_else(bad)?;
+                    let w = dst.width();
+                    if matches!(op, Op::CMPS | Op::SCAS) {
+                        let left = self.read(m, dst)?;
+                        let right = self.read(m, src)?;
+                        self.arithmetic(left, right, w, true, false);
+                    } else {
+                        let v = self.read(m, src)?;
+                        self.write(m, dst, v)?;
+                    }
+                    let delta = if self.flags & 1024 != 0 {
+                        (0u64).wrapping_sub(w as u64)
+                    } else {
+                        w as u64
+                    };
+                    if matches!(op, Op::MOVS | Op::LODS | Op::CMPS) {
+                        self.regs[6] = self.regs[6].wrapping_add(delta) & mask(address_width);
+                    }
+                    if matches!(op, Op::MOVS | Op::STOS | Op::CMPS | Op::SCAS) {
+                        self.regs[7] = self.regs[7].wrapping_add(delta) & mask(address_width);
+                    }
+                    if repeated {
+                        self.regs[1] = count - 1;
+                        let keep_going = !matches!(op, Op::CMPS | Op::SCAS)
+                            || ((self.flags & 64 == 0) == ins.prefixes.repnz());
+                        if count > 1 && keep_going {
+                            self.rip = pc;
+                        }
+                    }
+                }
+            }
             Op::NOP | Op::ENDBR64 => {}
             Op::SYSCALL => {
                 self.regs[1] = next;
@@ -497,6 +803,55 @@ impl Cpu for X86 {
                 };
                 self.write(m, Self::reg(2, w), v)?;
             }
+            Op::BT | Op::BTS | Op::BTR | Op::BTC => {
+                let mut dst = a.ok_or_else(bad)?;
+                let src = b.ok_or_else(bad)?;
+                let index = self.read(m, src)?;
+                let bits = (dst.width() * 8) as u64;
+                if let Value::Memory { address, width } = dst {
+                    if matches!(src, Value::Register { .. }) {
+                        let signed_index = signed(index, src.width()) as i64;
+                        let offset = signed_index
+                            .div_euclid(bits as i64)
+                            .wrapping_mul(width as i64);
+                        dst = Value::Memory {
+                            address: address.wrapping_add(offset as u64),
+                            width,
+                        };
+                    }
+                }
+                let bit = index & (bits - 1);
+                let value = self.read(m, dst)?;
+                self.flags = (self.flags & !1) | ((value >> bit) & 1);
+                if op != Op::BT {
+                    let mask = 1u64 << bit;
+                    let value = match op {
+                        Op::BTS => value | mask,
+                        Op::BTR => value & !mask,
+                        _ => value ^ mask,
+                    };
+                    self.write(m, dst, value)?;
+                }
+            }
+            Op::BSF | Op::BSR => {
+                let value = self.read(m, b.ok_or_else(bad)?)?;
+                self.flags = (self.flags & !64) | ((value == 0) as u64) << 6;
+                if value != 0 {
+                    let result = if op == Op::BSF {
+                        value.trailing_zeros()
+                    } else {
+                        63 - value.leading_zeros()
+                    };
+                    self.write(m, a.ok_or_else(bad)?, result as u64)?;
+                }
+            }
+            Op::RDTSC | Op::RDTSCP => {
+                self.regs[0] = self.ticks as u32 as u64;
+                self.regs[2] = self.ticks >> 32;
+                if op == Op::RDTSCP {
+                    self.regs[1] = 0;
+                }
+            }
             Op::CPUID => {
                 let leaf = self.regs[0] as u32;
                 self.regs[0] = 0;
@@ -697,5 +1052,46 @@ mod adapter_regressions {
                 ..
             })
         ));
+    }
+}
+
+#[cfg(test)]
+mod vector_tests {
+    use super::*;
+    use blink_core::Permissions;
+    #[test]
+    fn scalar_move_and_signal_preserve_upper_lanes() {
+        let mut m = Memory::new(8192);
+        m.map(0x1000, 4096, Permissions::RX).unwrap();
+        m.map(0x2000, 4096, Permissions::RW).unwrap();
+        m.initialize(0x1000, &[0xf2, 0x0f, 0x10, 0xc1]).unwrap();
+        let mut c = X86::new(0x1000, 0x3000);
+        c.xmm[0] = [0xaa; 16];
+        c.xmm[1] = [0xbb; 16];
+        c.step(&mut m).unwrap();
+        assert_eq!(c.xmm[0][..8], [0xbb; 8]);
+        assert_eq!(c.xmm[0][8..], [0xaa; 8]);
+        let before = c.xmm;
+        c.enter_signal(&mut m, 10, 0x1000, 0x1010, 0, 1).unwrap();
+        c.xmm = [[0; 16]; 16];
+        c.regs[4] += 8;
+        c.restore_signal(&m).unwrap();
+        assert_eq!(c.xmm, before);
+    }
+    #[test]
+    fn fs_negative_displacement_is_sign_extended() {
+        let mut m = Memory::new(8192);
+        m.map(0x1000, 4096, Permissions::RX).unwrap();
+        m.map(0x2000, 4096, Permissions::RW).unwrap();
+        m.initialize(
+            0x1000,
+            &[0x64, 0x48, 0x8b, 0x04, 0x25, 0xd8, 0xff, 0xff, 0xff],
+        )
+        .unwrap();
+        m.store(0x2000, 42, 8).unwrap();
+        let mut c = X86::new(0x1000, 0);
+        c.fs_base = 0x2028;
+        c.step(&mut m).unwrap();
+        assert_eq!(c.regs[0], 42);
     }
 }

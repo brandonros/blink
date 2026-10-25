@@ -12,6 +12,7 @@ pub enum Error {
     UnsupportedInstruction { pc: u64, encoding: u32 },
     UnsupportedSyscall(u64),
     ArithmeticFault,
+    BusFault { address: u64 },
     ResourceLimit,
     InvalidConfig(String),
     Closed,
@@ -65,6 +66,7 @@ const PAGE: u64 = 4096;
 struct Page {
     bytes: Box<[u8; 4096]>,
     permissions: Permissions,
+    bus_fault: bool,
 }
 #[derive(Clone)]
 pub struct Memory {
@@ -105,8 +107,57 @@ impl Memory {
                 Page {
                     bytes: Box::new([0; 4096]),
                     permissions,
+                    bus_fault: false,
                 },
             );
+        }
+        Ok(())
+    }
+    pub fn mapped_in_range(&self, address: u64, size: u64) -> usize {
+        if size == 0 {
+            return 0;
+        }
+        let end = address.saturating_add(size - 1);
+        self.pages.range(address / PAGE..=end / PAGE).count() * 4096
+    }
+    pub fn mark_bus_fault(&mut self, address: u64, size: u64) {
+        if size == 0 {
+            return;
+        }
+        let end = address.saturating_add(size - 1);
+        for (_, page) in self.pages.range_mut(address / PAGE..=end / PAGE) {
+            page.bus_fault = true;
+        }
+    }
+    pub fn unmap(&mut self, address: u64, size: u64) -> Result<()> {
+        if address % PAGE != 0 || size == 0 {
+            return Err(Error::InvalidConfig("unaligned/empty unmap".into()));
+        }
+        let end = address.checked_add(size - 1).ok_or(Error::ResourceLimit)?;
+        self.pages
+            .retain(|page, _| *page < address / PAGE || *page > end / PAGE);
+        Ok(())
+    }
+    pub fn protect(&mut self, address: u64, size: u64, permissions: Permissions) -> Result<()> {
+        if address % PAGE != 0 {
+            return Err(Error::InvalidConfig("unaligned protect".into()));
+        }
+        if size == 0 {
+            return Ok(());
+        }
+        let end = address.checked_add(size - 1).ok_or(Error::ResourceLimit)?;
+        let first = address / PAGE;
+        let last = end / PAGE;
+        if last - first >= self.max_pages as u64
+            || (first..=last).any(|p| !self.pages.contains_key(&p))
+        {
+            return Err(Error::MemoryFault {
+                address,
+                access: Access::Write,
+            });
+        }
+        for p in first..=last {
+            self.pages.get_mut(&p).unwrap().permissions = permissions;
         }
         Ok(())
     }
@@ -126,6 +177,11 @@ impl Memory {
                 return Err(Error::MemoryFault {
                     address: address.max(p * PAGE),
                     access,
+                });
+            }
+            if self.pages[&p].bus_fault {
+                return Err(Error::BusFault {
+                    address: address.max(p * PAGE),
                 });
             }
         }
@@ -188,6 +244,7 @@ pub enum Step {
     Syscall { number: u64, args: [u64; 6] },
 }
 pub trait Cpu {
+    fn set_ticks(&mut self, _ticks: u64) {}
     fn step(&mut self, memory: &mut Memory) -> Result<Step>;
     fn set_result(&mut self, result: u64);
     fn pc(&self) -> u64;
@@ -211,5 +268,22 @@ mod tests {
         assert!(m.check(u64::MAX, 2, Access::Read).is_err());
         assert!(m.map(0, 8192, Permissions::RW).is_err());
         assert_eq!(m.mapped_bytes(), 4096);
+    }
+}
+
+#[cfg(test)]
+mod mapping_tests {
+    use super::*;
+    #[test]
+    fn protection_change_is_atomic_and_unmap_tolerates_holes() {
+        let mut m = Memory::new(12288);
+        m.map(0x1000, 4096, Permissions::RW).unwrap();
+        assert!(m.protect(0x1000, 8192, Permissions::RX).is_err());
+        m.store(0x1000, 42, 8).unwrap();
+        m.protect(0x1000, 4096, Permissions::RX).unwrap();
+        assert!(m.store(0x1000, 3, 8).is_err());
+        m.unmap(0x1000, 8192).unwrap();
+        assert_eq!(m.mapped_bytes(), 0);
+        assert!(m.load(0x1000, 1).is_err());
     }
 }

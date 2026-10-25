@@ -11,9 +11,13 @@ for name in ['hello','process','exec','kill','thread','signal']:
  path=a.output/f'{name}-x86_64'
  subprocess.run(['cc','-nostdlib','-static','-Wl,--build-id=none','-o',str(path),str(root/f'rust/fixtures/{name}-x86_64.S')],check=True)
  fixtures[name]=path.resolve()
-path=a.output/'integer-x86_64'
-subprocess.run(['cc','-nostdlib','-static','-ffreestanding','-fno-stack-protector','-mno-sse','-mno-mmx','-O2','-Wl,--build-id=none','-o',str(path),str(root/'rust/fixtures/integer-x86_64.c')],check=True)
-fixtures['integer']=path.resolve()
+for name in ['integer', 'descriptors']:
+ path=a.output/f'{name}-x86_64'
+ subprocess.run(['cc','-nostdlib','-static','-ffreestanding','-fno-stack-protector','-mno-sse','-mno-mmx','-O2','-Wl,--build-id=none','-o',str(path),str(root/f'rust/fixtures/{name}-x86_64.c')],check=True)
+ fixtures[name]=path.resolve()
+path=a.output/'libc-x86_64'
+subprocess.run(['cc','-static','-O2','-Wl,--build-id=none','-o',str(path),str(root/'rust/fixtures/libc-x86_64.c')],check=True)
+fixtures['libc']=path.resolve()
 engines={'rust':[str(root/'target/debug/blink-cli')],'c-interpreter':[str(a.c_blink),'-j'],'c-jit':[str(a.c_blink)]}
 if platform.system()=='Linux' and platform.machine()=='x86_64':engines['native']=[]
 results=[]
@@ -26,7 +30,7 @@ for name,path in fixtures.items():
    r=subprocess.run(command,capture_output=True,timeout=10)
   except subprocess.TimeoutExpired as e:
    r=subprocess.CompletedProcess(command,124,e.stdout or b'',(e.stderr or b'')+b'timeout')
-  expected=b'9c39dd0ec11a7dd03f8c47090a6a46f5\n' if name=='integer' else b'child\n' if name=='process' else b'' if name in ('kill','thread','signal') else b'hello\n'
+  expected=b'libc hello\n' if name=='libc' else b'9c39dd0ec11a7dd03f8c47090a6a46f5\n' if name=='integer' else b'child\n' if name=='process' else b'' if name in ('kill','thread','signal','descriptors') else b'hello\n'
   row=dict(fixture=name,engine=engine,exit=r.returncode,stdout=r.stdout.decode(errors='replace'),stderr=r.stderr.decode(errors='replace'),seconds=time.monotonic()-start,sha256=hashlib.sha256(path.read_bytes()).hexdigest())
   results.append(row);print(f'{name:10} {engine:14} exit={r.returncode} output={r.stdout!r}')
   if r.returncode!=0 or r.stdout!=expected or r.stderr:failed=True

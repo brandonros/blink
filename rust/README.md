@@ -16,16 +16,17 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p blink-cli -- --root / --arch x86_64 /path/to/static-guest
 python3 rust/differential.py --c-blink /path/to/frozen/c-blink
 python3 rust/asm-regressions.py
+python3 rust/alpine-smoke.py --root /path/to/extracted/alpine-amd64
 ```
 
-The CLI also accepts `--cwd`, `--timeout-ms`, and `--max-instructions`. With no
+The CLI also accepts `--cwd`, `--timeout-ms`, `--max-instructions`, and `--trace`. With no
 `--root`, relative programs resolve from the host working directory; with an
 explicit root, the default guest cwd is `/`.
 
 The differential harness compiles static assembly and freestanding C fixtures,
 writes `target/differential/results.json`, and checks Rust, C interpreter, C JIT,
 and native Linux AMD64 when available. It reports all mismatches, including C
-baseline failures. The assembly harness runs 19 original Blink regressions and
+baseline failures. The assembly harness runs 22 original Blink regressions and
 writes `target/original-asm/results.json`; use `--cc` for a cross compiler and
 `--c-blink` for additional C controls. Neither suite establishes full ISA parity.
 
@@ -41,18 +42,24 @@ persist while cwd, descriptors, registers, and signal state start fresh each run
 Implemented slices:
 
 - Checked page-backed R/W/X memory and mapped-memory/process/instruction limits.
-- Static little-endian ELF64 ET_EXEC, zeroed BSS, argv/env/limited auxv.
+- Little-endian ELF64 ET_EXEC/ET_DYN and guest PT_INTERP loading, zeroed BSS,
+  argv/env/auxv including virtual IDs, interpreter base, and host-sourced entropy.
+- brk, private anonymous/file mmap, munmap/mprotect, and SIGBUS for wholly
+  past-EOF mapped file pages. Dynamic relocation runs inside the guest loader.
 - AMD64 integer operations, addressing, flags, stack, branches, multiply/divide,
   shifts/rotates, conditional moves, atomics under cooperative scheduling, and FS.
+  A limited SSE integer/move subset supports the tested libc and musl paths.
 - A small AArch64 integer/load-store/branch subset and TPIDR_EL0.
 - Guest fork, exec, wait, pipes, dup/close, IDs, exit and thread-group exit.
 - A constrained clone thread model sharing memory, cwd, descriptors and signal
   dispositions, TLS initialization, parent/child TID writes, clear-child-TID and
   futex WAIT/WAKE. Other clone/futex variants return explicit errors.
-- AMD64 rt_sigaction/procmask, queued kill delivery, integer signal frames,
+- AMD64 rt_sigaction/procmask, queued kill delivery, integer/XMM signal frames,
   handler-edited ucontext, and rt_sigreturn. SIGKILL cannot be blocked.
 - Rooted regular-file open/read/write/seek, cwd, guest-rooted symlink resolution,
-  shared open-file offsets, and regular-file close-on-exec.
+  shared open-file offsets, pread/writev, stat layouts, access/readlink, descriptor
+  flags/duplication/close-on-exec, poll readiness, and bounded pipe vector writes.
+  Regular-file metadata still comes from the host.
 - Bounded capture, timeout/cancellation (including blocked pipes/futexes), and
   explicit exit/signal/timeout/cancel/budget outcomes separate from engine errors.
 
@@ -63,8 +70,12 @@ its source retains upstream ISC notices.
 
 ## Limits and next gates
 
-This does not run a shell, package manager, Node, Bun, or either builder image.
-Dynamic loading, broad ISA/SIMD/FPU coverage, memory-management syscalls, general
+Alpine 3.22.7 AMD64 musl/BusyBox passes four real shell cases: echo, a pipeline
+with external exec, file redirection/append, and command substitution. The smoke
+harness uses disposable root copies and also passes with the C interpreter.
+Static glibc hello passes; this host's dynamic glibc refuses the conservative
+CPUID capability set. Package managers, Node, Bun, and builder images are unproven.
+Broad ISA/SIMD/FPU coverage, shared file mappings, directory operations, general
 VFS/procfs/rootless metadata, networking, and JIT remain. ARM64 signal frames,
 threaded exec, signal altstacks/restart, queued realtime signals, job control,
 automatic SIGCHLD notifications, and handlers for synchronous faults remain.
@@ -107,6 +118,10 @@ experimental runtime, including PR #218 changes. Builder checkout:
 The preexisting C executable, config, clean-build log and hash manifest are in
 `/workspace/work/blink-baseline`. The clean reference build uses the separate
 `o/rust-reference` directory. On this Linux x86_64 host, Rust, C interpreter and
-native Linux pass all seven new differential fixtures. C JIT fails the pipe/fork
+native Linux pass all eight original differential fixtures. A ninth descriptor fixture
+passes Rust/native and exposes C returning extra F_GETFL flags on a CLOEXEC pipe. C JIT fails the pipe/fork
 fixture and crashes during the exec fixture, including after a clean rebuild.
 Those failures remain visible; C is a comparison target, not an infallible oracle.
+The Alpine OCI layer used for smoke tests is
+`sha256:63e7e49699e8f5b93162e14c630db8294f87799bfec4376677160876bd6840dc`.
+The smoke report also records the BusyBox executable hash.

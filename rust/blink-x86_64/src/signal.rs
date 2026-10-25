@@ -19,7 +19,7 @@ const ORDER: [usize; 16] = [8, 9, 10, 11, 12, 13, 14, 15, 7, 6, 5, 3, 2, 0, 1, 4
 const UC: usize = 8;
 const INFO: usize = 312;
 impl X86 {
-    /// Linux rt_sigframe header: restorer, ucontext, siginfo. No FP state yet.
+    /// Linux rt_sigframe header: restorer, ucontext, siginfo. Legacy FP area preserves the implemented XMM registers; x87 remains unsupported.
     pub fn enter_signal(
         &mut self,
         memory: &mut Memory,
@@ -30,9 +30,9 @@ impl X86 {
         sender: u32,
     ) -> Result<()> {
         let sp = (self.regs[4].checked_sub(128).ok_or(Error::ResourceLimit)? & !15)
-            .checked_sub(440)
+            .checked_sub(952)
             .ok_or(Error::ResourceLimit)?;
-        let mut frame = [0u8; 440];
+        let mut frame = [0u8; 952];
         fn put(frame: &mut [u8], off: usize, value: u64) {
             frame[off..off + 8].copy_from_slice(&value.to_le_bytes());
         }
@@ -48,6 +48,12 @@ impl X86 {
         put(&mut frame, UC + 296, mask);
         put(&mut frame, INFO, signal as u64);
         put(&mut frame, INFO + 16, sender as u64);
+        put(&mut frame, UC + 224, sp + 440);
+        frame[440..442].copy_from_slice(&0x37fu16.to_le_bytes());
+        frame[464..468].copy_from_slice(&0x1f80u32.to_le_bytes());
+        for n in 0..16 {
+            frame[600 + n * 16..616 + n * 16].copy_from_slice(&self.xmm[n]);
+        }
         memory.write(sp, &frame)?;
         self.regs[4] = sp;
         self.regs[7] = signal as u64;
@@ -67,6 +73,20 @@ impl X86 {
                 "unsupported signal segment selectors".into(),
             ));
         }
+        let pointer = get(UC + 224);
+        let mut xmm = [[0; 16]; 16];
+        if pointer != 0 {
+            for (n, slot) in xmm.iter_mut().enumerate() {
+                memory.read(
+                    pointer
+                        .checked_add(160 + n as u64 * 16)
+                        .ok_or(Error::ResourceLimit)?,
+                    slot,
+                    Access::Read,
+                )?;
+            }
+        }
+        self.xmm = xmm;
         for (n, index) in ORDER.iter().enumerate() {
             self.regs[*index] = get(UC + 40 + n * 8);
         }

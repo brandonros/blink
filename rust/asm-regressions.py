@@ -6,7 +6,7 @@ root=Path(__file__).resolve().parent.parent
 parser=argparse.ArgumentParser();parser.add_argument('--cc',default='cc');parser.add_argument('--c-blink',type=Path);args=parser.parse_args()
 out=root/'target/original-asm';out.mkdir(parents=True,exist_ok=True)
 subprocess.run(['cargo','build','--offline','-p','blink-cli'],cwd=root,check=True)
-names='add cmc cmov cmp cmpxchg entryrdx exit movi movsxd movz nop overflow pop_rsp_memory push setcc write xchg lock lahf'.split()
+names='add cmc cmov cmp cmpxchg entryrdx exit movi movsxd movz nop overflow pop_rsp_memory push setcc write xchg lock lahf repmovsb repmovsb_self ssemov'.split()
 engines={'rust':[str(root/'target/debug/blink-cli')]}
 if platform.system()=='Linux' and platform.machine()=='x86_64':engines['native']=[]
 if args.c_blink:engines.update({'c-interpreter':[str(args.c_blink.resolve()),'-j'],'c-jit':[str(args.c_blink.resolve())]})

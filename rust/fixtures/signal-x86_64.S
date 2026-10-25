@@ -25,6 +25,7 @@ _start:
  jne fail
  # Unblocking delivers the handler before the following instruction.
  mov $0x123456789abcdef0, %r12
+ movq %r12, %xmm3
  mov $14, %eax
  mov $1, %edi
  lea mask(%rip), %rsi
@@ -37,6 +38,9 @@ _start:
  mov $0x123456789abcdef0, %rax
  cmp %rax, %r12
  jne fail
+ movq %xmm3, %rbx
+ cmp %rax, %rbx
+ jne fail
  xor %edi, %edi
  jmp exit
 handler:
@@ -48,6 +52,7 @@ handler:
  movq $123, 144(%rdx)
  incq seen(%rip)
  xor %r12d, %r12d
+ pxor %xmm3, %xmm3
  ret
 restorer:
  mov $15, %eax

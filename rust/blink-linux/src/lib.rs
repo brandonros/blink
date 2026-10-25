@@ -2,6 +2,7 @@
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 #[derive(Default)]
 pub struct Pipe {
+    pub inode: u64,
     pub bytes: VecDeque<u8>,
     pub readers: usize,
     pub writers: usize,
@@ -12,6 +13,7 @@ pub enum Fd {
         read: bool,
         write: bool,
         cloexec: bool,
+        append: bool,
     },
     Stdin,
     Stdout,
@@ -27,11 +29,13 @@ impl Clone for Fd {
                 read,
                 write,
                 cloexec,
+                append,
             } => Self::File {
                 file: file.clone(),
                 read: *read,
                 write: *write,
                 cloexec: *cloexec,
+                append: *append,
             },
             Self::Stdin => Self::Stdin,
             Self::Stdout => Self::Stdout,
@@ -96,3 +100,89 @@ pub struct SignalAction {
     pub mask: u64,
 }
 pub const UNBLOCKABLE: u64 = (1 << 8) | (1 << 18);
+
+impl Fd {
+    pub fn stat(&self) -> std::io::Result<blink_host::FileStat> {
+        use blink_host::FileStat;
+        match self {
+            Self::File { file, .. } => blink_host::file_stat(&file.borrow().metadata()?),
+            _ => Ok(FileStat {
+                dev: 0xffff_ff00,
+                ino: match self {
+                    Self::Stdin => 1,
+                    Self::Stdout => 2,
+                    Self::Stderr => 3,
+                    Self::Reader(p) | Self::Writer(p) => p.borrow().inode,
+                    _ => unreachable!(),
+                },
+                nlink: 1,
+                mode: 0o010600,
+                blksize: 4096,
+                ..Default::default()
+            }),
+        }
+    }
+}
+pub fn stat_bytes(s: &blink_host::FileStat, arch: blink_core::GuestArch) -> Vec<u8> {
+    let mut bytes = vec![
+        0;
+        if arch == blink_core::GuestArch::X86_64 {
+            144
+        } else {
+            128
+        }
+    ];
+    let mut put = |offset: usize, width: usize, value: u64| {
+        bytes[offset..offset + width].copy_from_slice(&value.to_le_bytes()[..width])
+    };
+    put(0, 8, s.dev);
+    put(8, 8, s.ino);
+    if arch == blink_core::GuestArch::X86_64 {
+        put(16, 8, s.nlink);
+        put(24, 4, s.mode as u64);
+        put(28, 4, s.uid as u64);
+        put(32, 4, s.gid as u64);
+        put(40, 8, s.rdev);
+        put(56, 8, s.blksize);
+    } else {
+        put(16, 4, s.mode as u64);
+        put(20, 4, s.nlink);
+        put(24, 4, s.uid as u64);
+        put(28, 4, s.gid as u64);
+        put(32, 8, s.rdev);
+        put(56, 4, s.blksize);
+    }
+    put(48, 8, s.size);
+    put(64, 8, s.blocks);
+    put(72, 8, s.atime as u64);
+    put(80, 8, s.atime_nsec as u64);
+    put(88, 8, s.mtime as u64);
+    put(96, 8, s.mtime_nsec as u64);
+    put(104, 8, s.ctime as u64);
+    put(112, 8, s.ctime_nsec as u64);
+    bytes
+}
+
+#[derive(Clone)]
+pub struct Credentials {
+    pub uid: u32,
+    pub euid: u32,
+    pub suid: u32,
+    pub gid: u32,
+    pub egid: u32,
+    pub sgid: u32,
+    pub groups: Vec<u32>,
+}
+impl Credentials {
+    pub fn new(uid: u32, gid: u32) -> Self {
+        Self {
+            uid,
+            euid: uid,
+            suid: uid,
+            gid,
+            egid: gid,
+            sgid: gid,
+            groups: Vec::new(),
+        }
+    }
+}
