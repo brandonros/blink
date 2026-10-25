@@ -173,7 +173,7 @@ The preexisting C executable, config, clean-build log and hash manifest are in
 `o/rust-reference` directory. On this Linux x86_64 host, Rust, C interpreter and
 native Linux comparisons retain per-fixture results. The expanded filesystem,
 MXCSR restart, socketpair and alternate-stack cases expose additional C baseline
-differences; consult the report rather than treating the C runtime as the oracle. All 22 fixtures pass Rust/native. C differs on vfork memory sharing and
+differences; consult the report rather than treating the C runtime as the oracle. All 23 fixtures pass Rust/native. C differs on vfork memory sharing and
 returns extra F_GETFL flags on a CLOEXEC pipe in the descriptor fixture. C JIT fails the pipe/fork
 fixture and crashes during the exec fixture, including after a clean rebuild.
 Those failures remain visible; C is a comparison target, not an infallible oracle.
@@ -259,7 +259,7 @@ children, and remain through exec. Threads share their process timer; pending
 standard signals coalesce. Wall/monotonic clock queries use host clock adapters.
 Nanosleep and absolute/relative clock_nanosleep cooperate with scheduling and
 write remaining time on interruption. Virtual/profiling CPU timers and other
-clock IDs remain unsupported. The native comparison suite now has 22 compiled
+clock IDs remain unsupported. The native comparison suite now has 23 compiled
 fixtures, including real-timer delivery, fork inheritance, and interrupted sleep.
 
 Packed conversion memory operands are checked at their architectural width: CVTDQ2PD and CVTPS2PD read eight bytes, even though the decoder reports a 16-byte vector width. Page-boundary and unmasked-exception tests guard source accesses and whole-destination preservation.
@@ -322,9 +322,11 @@ Rust interpreter. `node-fixture.py` extracts only that digest from a layout pull
 by linux-oci-builder; `node-smoke.py --root ROOT` runs the version gate. The image
 manifest is `sha256:025b8e975a61d94e33abeafaad1255ef44e4898cf1a1b6446860009c72e6d284`;
 the Node executable SHA-256 is `5a92a46a1d8279fec6776e3123ca22e26a6fddbb7cf1b55e019dbb38eea8ff26`.
-This is not yet a JavaScript execution gate: the current `--jitless -p '1 + 2'`
+The JavaScript gate uses `--jitless`: the current `--jitless -p '1 + 2'`
 probe has progressed through thread startup and SIMD/conditional-move feature checks,
-and now evaluates and prints `3` for `1 + 2`; shutdown stops at futex requeue.
+and now evaluates JavaScript, runs the builder's file-I/O body and exits cleanly
+with `--jitless`. Normal Node startup currently needs separate virtual reservation
+and backed-memory accounting for its 512 MiB CodeRange.
 The feature qualifications are documented in [CPU-FEATURES.md](CPU-FEATURES.md). CLI `--max-memory BYTES` and `--max-image-size BYTES`
 expose existing runtime limits for this 130 MB executable.
 
@@ -366,7 +368,7 @@ exec, truncate to 15 bytes and handle guest page boundaries without host prctl.
 The native suite checks these semantics and TZCNT/LZCNT results plus defined
 CF/ZF flags at all operand widths. Lifecycle tests cancel blocked epoll, eventfd
 and pipe waits, then reuse the same runtime. The pinned Node version gate has
-passed on Linux AMD64 and Darwin arm64 CI; JavaScript execution remains unproven.
+passed on Linux AMD64 and Darwin arm64 CI; The later requeue gate establishes `--jitless` JavaScript and file I/O with clean exit.
 
 
 Packed SIMD coverage includes multiply-high/low, unsigned dword multiplication,
@@ -436,3 +438,13 @@ callback that blocks inside its implementation still cannot be interrupted.
 The page-based decoder and bulk-copy path retain permission/page-boundary checks
 and self-modifying code behavior; the pinned Node version probe dropped from
 about 16 seconds to 4 seconds on this development host.
+
+
+FUTEX_REQUEUE and FUTEX_CMP_REQUEUE move actual blocked guest waiters without
+waking transferred threads; failed comparisons leave queues unchanged. The native
+three-thread test checks wake/transfer counts and subsequent wakes on each address.
+Node smoke now requires version, JavaScript evaluation, and the existing builder
+checkpoint's file-I/O body to exit zero. The latter two use --jitless and the pinned
+Alpine/musl image, so they are not the original Debian-image checkpoint or a JIT
+claim. The arithmetic control also passes natively and in the preserved C
+interpreter with an explicit musl loader; the C control is not rootfs-isolated.

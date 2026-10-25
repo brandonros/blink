@@ -2572,6 +2572,64 @@ pub(super) fn run(
                                     break;
                                 }
                             }
+                        } else if matches!(args[1], 3 | 4 | 131 | 132) {
+                            let private = args[1] & 128 != 0;
+                            if args[4] & 3 != 0
+                                || (args[2] as u32 as i32) < 0
+                                || (args[3] as u32 as i32) < 0
+                            {
+                                errno(22)
+                            } else if args[0] >= 0x800000000000
+                                || args[4] >= 0x800000000000
+                                || !private
+                                    && (process
+                                        .memory
+                                        .borrow()
+                                        .check(args[0], 4, Access::Read)
+                                        .is_err()
+                                        || process
+                                            .memory
+                                            .borrow()
+                                            .check(args[4], 4, Access::Read)
+                                            .is_err())
+                            {
+                                errno(14)
+                            } else {
+                                let comparison = if args[1] & 127 == 4 {
+                                    process
+                                        .memory
+                                        .borrow()
+                                        .load(args[0], 4)
+                                        .map(|value| value == args[5] as u32 as u64)
+                                } else {
+                                    Ok(true)
+                                };
+                                match comparison {
+                                    Err(_) => errno(14),
+                                    Ok(false) => errno(11),
+                                    Ok(true) => {
+                                        let woke = wake(
+                                            &mut processes,
+                                            &process.memory,
+                                            args[0],
+                                            args[2] as u32,
+                                        );
+                                        let mut moved = 0;
+                                        for waiter in processes.values_mut() {
+                                            if moved >= args[3] as u32 {
+                                                break;
+                                            }
+                                            if Rc::ptr_eq(&waiter.memory, &process.memory)
+                                                && waiter.futex == Some(args[0])
+                                            {
+                                                waiter.futex = Some(args[4]);
+                                                moved += 1;
+                                            }
+                                        }
+                                        woke as u64 + moved as u64
+                                    }
+                                }
+                            }
                         } else if args[1] == 1 || args[1] == 129 {
                             if (args[2] as u32 as i32) < 0 {
                                 errno(22)
@@ -3955,6 +4013,9 @@ fn send_file(
         Ok(n) => n,
         Err(e) => return Ok(Some(blink_linux::errno(&e))),
     };
+    if read == 0 {
+        return Ok(Some(0));
+    }
     let wrote = match output {
         Fd::Virtual(_) => read,
         Fd::Stdout(status) | Fd::Stderr(status) => {
