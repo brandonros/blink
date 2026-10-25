@@ -1,0 +1,41 @@
+name: Rust runtime
+on:
+  push:
+    paths: ['rust/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/rust.yml']
+  pull_request:
+    paths: ['rust/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/rust.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  runtime:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host platform
+        run: uname -sm
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+      - name: Format
+        run: cargo +stable fmt --all --check
+      - name: Test lifecycle, CPU and host metadata
+        run: cargo +stable test --workspace --locked
+      - name: Clippy
+        run: cargo +stable clippy --workspace --all-targets --locked -- -D warnings
+      - name: Original assembly and native Linux comparisons
+        if: runner.os == 'Linux'
+        run: |
+          python3 rust/asm-regressions.py
+          python3 rust/differential.py --rust-native-only
+      - uses: actions/upload-artifact@v4
+        if: always() && runner.os == 'Linux'
+        with:
+          name: rust-linux-comparisons
+          path: |
+            target/original-asm/results.json
+            target/differential/results.json

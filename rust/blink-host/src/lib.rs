@@ -112,7 +112,7 @@ pub fn read_link(root: &Path, cwd: &Path, guest: &Path) -> io::Result<PathBuf> {
     fs::read_link(resolve_from(root, cwd, parent, false)?.join(name))
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct FileStat {
     pub dev: u64,
     pub ino: u64,
@@ -332,6 +332,52 @@ impl Directory {
         *self = Self::open(self.path.clone(), self.root.clone())?;
         Ok(())
     }
+}
+
+pub struct FilesystemStat {
+    pub kind: u64,
+    pub block_size: u64,
+    pub fragment_size: u64,
+    pub blocks: u64,
+    pub free_blocks: u64,
+    pub available_blocks: u64,
+    pub files: u64,
+    pub free_files: u64,
+    pub id: u64,
+    pub name_max: u64,
+    pub readonly: bool,
+}
+pub fn filesystem_stat(file: &fs::File) -> io::Result<FilesystemStat> {
+    let stat = rustix::fs::fstatvfs(file)?;
+    #[cfg(target_os = "linux")]
+    let kind = rustix::fs::fstatfs(file)?.f_type as u64;
+    #[cfg(not(target_os = "linux"))]
+    let kind = 0x01021994; // The guest sees a virtual filesystem on non-Linux hosts.
+    Ok(FilesystemStat {
+        kind,
+        block_size: stat.f_bsize,
+        fragment_size: stat.f_frsize,
+        blocks: stat.f_blocks,
+        free_blocks: stat.f_bfree,
+        available_blocks: stat.f_bavail,
+        files: stat.f_files,
+        free_files: stat.f_ffree,
+        id: stat.f_fsid,
+        name_max: stat.f_namemax,
+        readonly: stat.f_flag.contains(rustix::fs::StatVfsMountFlags::RDONLY),
+    })
+}
+
+/// Always nonblocking at the host boundary; the guest scheduler owns waiting.
+pub fn flock(file: &fs::File, operation: u64) -> io::Result<()> {
+    use rustix::fs::FlockOperation;
+    let operation = match operation & !4 {
+        1 => FlockOperation::NonBlockingLockShared,
+        2 => FlockOperation::NonBlockingLockExclusive,
+        8 => FlockOperation::NonBlockingUnlock,
+        _ => return Err(io::ErrorKind::InvalidInput.into()),
+    };
+    Ok(rustix::fs::flock(file, operation)?)
 }
 
 #[cfg(test)]

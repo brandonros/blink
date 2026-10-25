@@ -1,6 +1,6 @@
 use blink::{Blink, Command, GuestArch, RuntimeConfig, Termination};
 use std::{path::PathBuf, time::Duration};
-const USAGE:&str="usage: blink-cli [--root ROOT] [--cwd DIR] [--arch x86_64|aarch64] [--timeout-ms N] [--max-instructions N] [--] PROGRAM [ARGS...]";
+const USAGE:&str="usage: blink-cli [--root ROOT] [--cwd DIR] [--uid UID] [--gid GID] [--env KEY=VALUE] [--rootless-metadata] [--trace] [--arch x86_64|aarch64] [--timeout-ms N] [--max-instructions N] [--] PROGRAM [ARGS...]";
 fn main() {
     match run() {
         Ok(code) => std::process::exit(code),
@@ -16,6 +16,9 @@ fn run() -> blink::Result<i32> {
     let mut root_set = false;
     let mut cwd = None;
     let mut arch = GuestArch::X86_64;
+    let mut uid = 0;
+    let mut gid = 0;
+    let mut env = Vec::new();
     let mut timeout = None;
     let mut budget = None;
     let mut trace = false;
@@ -33,6 +36,30 @@ fn run() -> blink::Result<i32> {
                 root_set = true;
             }
             Some("--cwd") => cwd = Some(PathBuf::from(args.next().ok_or_else(usage)?)),
+            Some("--uid") => {
+                uid = args
+                    .next()
+                    .ok_or_else(usage)?
+                    .parse()
+                    .map_err(|_| usage())?
+            }
+            Some("--gid") => {
+                gid = args
+                    .next()
+                    .ok_or_else(usage)?
+                    .parse()
+                    .map_err(|_| usage())?
+            }
+            Some("--env") => {
+                let value = args.next().ok_or_else(usage)?;
+                let Some((key, _)) = value.split_once('=') else {
+                    return Err(usage());
+                };
+                if key.is_empty() {
+                    return Err(usage());
+                }
+                env.push(value);
+            }
             Some("--arch") => {
                 arch = match args.next().as_deref() {
                     Some("x86_64") => GuestArch::X86_64,
@@ -70,6 +97,9 @@ fn run() -> blink::Result<i32> {
     let mut runtime = Blink::create(config)?;
     let mut command = Command::new(program);
     command.args = args.collect();
+    command.uid = uid;
+    command.gid = gid;
+    command.env = env;
     command.timeout = timeout;
     command.cwd = match cwd {
         Some(c) => c,

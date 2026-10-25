@@ -71,6 +71,21 @@ impl Command {
             cancellation: CancellationToken::default(),
         }
     }
+    pub fn args(mut self, values: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.args.extend(values.into_iter().map(Into::into));
+        self
+    }
+    pub fn envs(
+        mut self,
+        values: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
+    ) -> Self {
+        self.env.extend(
+            values
+                .into_iter()
+                .map(|(k, v)| format!("{}={}", k.as_ref(), v.as_ref())),
+        );
+        self
+    }
     pub fn uid(mut self, uid: u32) -> Self {
         self.uid = uid;
         self

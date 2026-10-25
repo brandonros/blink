@@ -187,6 +187,24 @@ impl Cpu for X86 {
         let pc = self.rip;
         let (ins, next) = decode::instruction(m, pc)?;
         let op = ins.opcode();
+        // Hints never access memory, even if their decoder operand describes a
+        // cache line rather than one of our scalar/vector load widths.
+        // Memory is interpreted sequentially, so fences need no host operation.
+        if matches!(
+            op,
+            Op::NOP
+                | Op::ENDBR64
+                | Op::PREFETCHNTA
+                | Op::PREFETCH0
+                | Op::PREFETCH1
+                | Op::PREFETCH2
+                | Op::LFENCE
+                | Op::SFENCE
+                | Op::MFENCE
+        ) {
+            self.rip = next;
+            return Ok(Step::Continue);
+        }
         let bad = || Error::UnsupportedInstruction {
             pc,
             encoding: op as u32,
@@ -508,7 +526,6 @@ impl Cpu for X86 {
                     }
                 }
             }
-            Op::NOP | Op::ENDBR64 => {}
             Op::SYSCALL => {
                 self.regs[1] = next;
                 self.regs[11] = self.flags;
@@ -1163,6 +1180,18 @@ mod vector_tests {
 #[cfg(test)]
 mod byte_swap_tests {
     use super::*;
+    #[test]
+    fn prefetch_invalid_address_is_only_a_hint() {
+        let mut memory = Memory::new(4096);
+        memory.map(4096, 4096, blink_core::Permissions::RX).unwrap();
+        memory.initialize(4096, &[0x0f, 0x18, 0x0a]).unwrap();
+        let mut cpu = X86::new(4096, 0);
+        cpu.regs[2] = u64::MAX;
+        cpu.flags = 0x8d7;
+        cpu.step(&mut memory).unwrap();
+        assert_eq!(cpu.rip, 4099);
+        assert_eq!(cpu.flags, 0x8d7);
+    }
     #[test]
     fn byte_swap_register_width() {
         let mut memory = Memory::new(4096);

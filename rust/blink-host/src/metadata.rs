@@ -91,6 +91,9 @@ impl Target<'_> {
         let stat = self.stat(true)?;
         let uid = if uid == u32::MAX { stat.uid } else { uid };
         let gid = if gid == u32::MAX { stat.gid } else { gid };
+        if stat.mode & 0o170000 == 0o120000 && uid == stat.uid && gid == stat.gid {
+            return Ok(()); // No metadata change is needed, including on Linux symlinks.
+        }
         let mut owner = [0; 8];
         owner[..4].copy_from_slice(&uid.to_le_bytes());
         owner[4..].copy_from_slice(&gid.to_le_bytes());

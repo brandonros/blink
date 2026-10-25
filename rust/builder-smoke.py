@@ -21,7 +21,7 @@ p.add_argument('--output', type=Path, default=repo/'target/builder-smoke')
 a = p.parse_args()
 a.output.mkdir(parents=True, exist_ok=True)
 subprocess.run(['cargo','build','--offline','-p','blink-cli'],cwd=repo,check=True)
-expected = {'00-hello': b'Hello, world!\n', '01-files': b'hello\n', '02-pipelines': b'apple\npear\n', '03-script': b'Hello, image-forge!\n', '04-archives': (hashlib.sha256(b'archive-test\n').hexdigest()+'  /work/restored/message\n').encode(), '05-environment': b'cwd=/ arch=x86_64\n'}
+expected = {'00-hello': b'Hello, world!\n', '01-files': b'hello\n', '02-pipelines': b'apple\npear\n', '03-script': b'Hello, image-forge!\n', '04-archives': (hashlib.sha256(b'archive-test\n').hexdigest()+'  /work/restored/message\n').encode(), '05-environment': b'cwd=/ arch=x86_64\n', '07-proc': b'proc-status-supported\n'}
 results = []
 for name, final_output in expected.items():
     if a.filter not in name:

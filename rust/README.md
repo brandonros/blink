@@ -19,9 +19,10 @@ python3 rust/asm-regressions.py
 python3 rust/alpine-smoke.py --root /path/to/extracted/alpine-amd64
 python3 rust/builder-smoke.py --root /path/to/alpine --builder /path/to/linux-oci-builder
 python3 rust/rootless-smoke.py --root /path/to/alpine
+python3 rust/apk-smoke.py --root /path/to/alpine
 ```
 
-The CLI also accepts `--cwd`, `--timeout-ms`, `--max-instructions`, `--rootless-metadata`, and `--trace`. With no
+The CLI also accepts `--cwd`, `--uid`, `--gid`, repeated `--env KEY=VALUE`, `--timeout-ms`, `--max-instructions`, `--rootless-metadata`, and `--trace`. With no
 `--root`, relative programs resolve from the host working directory; with an
 explicit root, the default guest cwd is `/`.
 
@@ -65,7 +66,11 @@ Implemented slices:
   shared open-file offsets, pread/writev, stat layouts, access/readlink, descriptor
   flags/duplication/close-on-exec, poll readiness, and bounded pipe vector writes.
   sendfile, directories/getdents64, mkdir/link/symlink/rename/unlink/chmod,
-  per-process umask, and regular-file/directory timestamp updates.
+  per-process umask, regular-file/directory timestamp updates, filesystem
+  information, nonblocking host-backed flock with guest scheduling, and sync.
+- Virtual `/dev/null`, zero and random devices, and a small read-only proc
+  namespace: guest status, exec arguments/environment, mounts, and executable
+  symlink. No host proc data or host mount operations are used.
 - Optional persistent rootless owner/mode attributes (`RuntimeConfig::rootless_metadata`),
   with hardlink/rename/open-descriptor identity, setgid-directory inheritance,
   and chown set-ID clearing. Host ownership stays unchanged. Attribute payloads
@@ -86,15 +91,19 @@ Alpine 3.22.7 AMD64 musl/BusyBox passes four real shell cases: echo, a pipeline
 with external exec, file redirection/append, and command substitution. The smoke
 harness uses disposable root copies and also passes with the C interpreter.
 Static glibc hello passes; this host's dynamic glibc refuses the conservative
-CPUID capability set. Package managers, Node, Bun, and builder images are unproven.
+CPUID capability set. APK version, installed-package listing, offline simulation, and a persisted
+world update for an already-installed package pass `apk-smoke.py`. The fixture
+uses no repositories or downloads and does not establish new-package installation.
+Node, Bun, and builder images are unproven.
 
 The six small builder examples `00-hello` through `05-environment` pass every
 RUN and CMD via `builder-smoke.py`, including gzip/tar round trip and SHA-256.
+The `07-proc` example also passes against the virtual guest proc filesystem.
 This harness reads their original Dockerfiles, retains a disposable root between
 steps, and checks expected output. It does not assemble/export an OCI image or
 replace the 26 agent-platform checkpoint receipts.
-Broad ISA/SIMD/FPU coverage, shared file mappings, full directory-relative *at
-operations, general VFS/procfs, networking, and JIT remain. ARM64 signal frames,
+Broad ISA/SIMD/FPU coverage, shared file mappings, remaining directory-relative
+*at operations, broader VFS/procfs, networking, and JIT remain. ARM64 signal frames,
 threaded exec, signal altstacks, queued realtime signals, job control,
 automatic SIGCHLD notifications, and handlers for synchronous faults remain.
 No image-build checkpoint or verifier has passed with Rust.
@@ -108,7 +117,9 @@ chown is unsupported. Rootless mode is privileged build bookkeeping, not a
 permission/capability enforcement model. It retains host read/write access when
 guest mode is 000. Xattr failures/corruption are errors. Linux symlink ownership
 changes are not supported by user xattrs; symlink timestamps and guest xattr
-syscalls remain. Rewinding a renamed open directory still uses its original path.
+syscalls remain. Directory-relative operations and rewind still use a stored path, so renaming
+an open directory is not fully supported. Virtual proc files expose a small
+explicit subset and snapshot exec inputs; they are not complete Linux procfs.
 File close uses Rust's Drop and does not yet surface late host close errors.
 Non-UTF8 exec/path strings and overlapping ELF segment pages are not implemented.
 No macOS execution or broader host compatibility has been validated yet.
@@ -153,3 +164,16 @@ Those failures remain visible; C is a comparison target, not an infallible oracl
 The Alpine OCI layer used for smoke tests is
 `sha256:63e7e49699e8f5b93162e14c630db8294f87799bfec4376677160876bd6840dc`.
 The smoke report also records the BusyBox executable hash.
+
+
+## Continuous checks
+
+`.github/workflows/rust.yml` runs workspace tests and Clippy on Ubuntu and macOS.
+Linux additionally runs the original assembly subset and Rust/native differential
+fixtures. `--rust-native-only` deliberately selects those two engines for CI;
+the default differential command still reports every C baseline difference.
+The macOS job is a validation gate, not a claim that agent-platform builds pass.
+
+In the current cloud environment, Alpine's package CDN is absent from the
+configured network allowlist. Download/install coverage remains blocked there,
+in addition to the still-unimplemented guest Internet socket backend.

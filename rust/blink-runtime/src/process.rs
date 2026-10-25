@@ -1,7 +1,8 @@
 //! Cooperative guest processes. No host fork, host signals, or blocking guest pipes.
+mod virtual_fs;
 use crate::{elf, Command, RunOutcome, RuntimeConfig, Termination};
 use blink_core::{Access, Cpu, Error, GuestArch, Memory, Permissions, Result, Step};
-use blink_linux::{Fd, Pipe, SignalAction, UNBLOCKABLE};
+use blink_linux::{Fd, Pipe, SignalAction, VirtualContent, UNBLOCKABLE};
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -58,8 +59,11 @@ impl Heap {
 #[derive(Clone)]
 struct Process {
     parent: u32,
+    tid: u32,
     credentials: blink_linux::Credentials,
     executable: std::path::PathBuf,
+    argv: Vec<String>,
+    env: Vec<String>,
     cpu: Engine,
     memory: Rc<RefCell<Memory>>,
     heap: Rc<RefCell<Heap>>,
@@ -234,8 +238,11 @@ pub(super) fn run(
         1u32,
         Process {
             parent: 0,
+            tid: 1,
             credentials,
             executable: initial.executable,
+            argv: initial.argv,
+            env: command.env.clone(),
             cpu: Engine::new(config.guest_arch, initial.entry, initial.stack),
             memory: Rc::new(RefCell::new(initial.memory)),
             heap: Rc::new(RefCell::new(Heap::new(initial.heap))),
@@ -389,6 +396,12 @@ pub(super) fn run(
                         53 => 268,
                         166 => 95,
                         88 => 280,
+                        43 => 137,
+                        44 => 138,
+                        32 => 73,
+                        82 => 74,
+                        83 => 75,
+                        46 => 77,
                         276 => 316,
                         64 => 1,
                         57 => 3,
@@ -549,34 +562,56 @@ pub(super) fn run(
                         } else {
                             (args[1], args[2])
                         };
-                        let path = cstring(&process.memory.borrow(), ptr);
-                        match path {
-                            Err(_) => errno(14),
-                            Ok(path) => {
-                                if (nr != 21 && args[0] as i32 != -100 && !path.starts_with('/'))
-                                    || (nr == 439 && args[3] != 0)
-                                {
-                                    return Err(Error::UnsupportedSyscall(number));
-                                }
-                                if mode & !7 != 0 {
-                                    errno(22)
-                                } else {
-                                    match blink_host::path_stat(
-                                        &config.rootfs,
-                                        &process.cwd.borrow(),
-                                        std::path::Path::new(&path),
-                                        false,
-                                        config.rootless_metadata,
+                        if mode & !7 != 0 {
+                            errno(22)
+                        } else if nr == 439 && args[3] & !(256 | 512) != 0 {
+                            return Err(Error::UnsupportedSyscall(number));
+                        } else {
+                            match cstring(&process.memory.borrow(), ptr) {
+                                Err(_) => errno(14),
+                                Ok(path) => {
+                                    let cwd = match directory_cwd(
+                                        config,
+                                        &process,
+                                        if nr == 21 { -100 } else { args[0] as i32 },
+                                        &path,
                                     ) {
-                                        Err(e) => blink_linux::errno(&e),
+                                        Ok(cwd) => cwd,
+                                        Err(error) => {
+                                            process.cpu.cpu().set_result(error);
+                                            continue;
+                                        }
+                                    };
+                                    let absolute = virtual_fs::path(&cwd, &path);
+                                    let nofollow = nr == 439 && args[3] & 256 != 0;
+                                    let stat = virtual_fs::stat(
+                                        config, &process, &processes, &absolute, nofollow,
+                                    )
+                                    .unwrap_or_else(|| {
+                                        blink_host::path_stat(
+                                            &config.rootfs,
+                                            &cwd,
+                                            std::path::Path::new(&path),
+                                            nofollow,
+                                            config.rootless_metadata,
+                                        )
+                                        .map_err(|e| blink_linux::errno(&e))
+                                    });
+                                    match stat {
+                                        Err(error) => error,
                                         Ok(stat) => {
-                                            if (mode & 1 != 0 && stat.mode & 0o111 == 0)
-                                                || (mode & 2 != 0 && stat.mode & 0o222 == 0)
-                                                || (mode & 4 != 0 && stat.mode & 0o444 == 0)
+                                            if mode & 2 != 0
+                                                && virtual_fs::filesystem(&absolute)
+                                                    .is_some_and(|s| s.readonly)
                                             {
-                                                errno(13)
+                                                errno(30)
                                             } else {
-                                                0
+                                                access_mode(
+                                                    &stat,
+                                                    &process.credentials,
+                                                    mode as u32,
+                                                    nr == 439 && args[3] & 512 != 0,
+                                                )
                                             }
                                         }
                                     }
@@ -608,22 +643,47 @@ pub(super) fn run(
                                         .get(&(args[0] as i32))
                                         .map(|fd| fd.stat(config.rootless_metadata))
                                 } else {
-                                    if nr == 262 && args[0] as i32 != -100 && !path.starts_with('/')
-                                    {
-                                        return Err(Error::UnsupportedSyscall(number));
-                                    }
                                     let path = if path.is_empty() && flags & 4096 != 0 {
                                         "."
                                     } else {
                                         &path
                                     };
-                                    Some(blink_host::path_stat(
-                                        &config.rootfs,
-                                        &process.cwd.borrow(),
-                                        std::path::Path::new(path),
+                                    let cwd = match directory_cwd(
+                                        config,
+                                        &process,
+                                        if nr == 262 { args[0] as i32 } else { -100 },
+                                        path,
+                                    ) {
+                                        Ok(cwd) => cwd,
+                                        Err(error) => {
+                                            process.cpu.cpu().set_result(error);
+                                            continue;
+                                        }
+                                    };
+                                    let absolute = virtual_fs::path(&cwd, path);
+                                    if let Some(node) = virtual_fs::stat(
+                                        config,
+                                        &process,
+                                        &processes,
+                                        &absolute,
                                         flags & 256 != 0,
-                                        config.rootless_metadata,
-                                    ))
+                                    ) {
+                                        match node {
+                                            Ok(stat) => Some(Ok(stat)),
+                                            Err(error) => {
+                                                process.cpu.cpu().set_result(error);
+                                                continue;
+                                            }
+                                        }
+                                    } else {
+                                        Some(blink_host::path_stat(
+                                            &config.rootfs,
+                                            &cwd,
+                                            std::path::Path::new(path),
+                                            flags & 256 != 0,
+                                            config.rootless_metadata,
+                                        ))
+                                    }
                                 };
                                 match stat {
                                     None => errno(9),
@@ -848,6 +908,22 @@ pub(super) fn run(
                                     0
                                 }
                                 3 => match &fd {
+                                    Fd::Virtual(v) => {
+                                        let v = v.borrow();
+                                        let mode = if v.read && v.write {
+                                            2
+                                        } else {
+                                            u64::from(v.write)
+                                        };
+                                        mode | if matches!(
+                                            v.content,
+                                            VirtualContent::Directory { .. }
+                                        ) {
+                                            0x10000
+                                        } else {
+                                            0
+                                        }
+                                    }
                                     Fd::Directory(_) => 0x18000,
                                     Fd::UnixSocket { nonblock, .. } => {
                                         2 | if *nonblock { 0x800 } else { 0 }
@@ -880,6 +956,41 @@ pub(super) fn run(
                             let fd = process.fds.borrow().get(&(args[0] as i32)).cloned();
                             match fd.as_ref() {
                                 None => errno(9),
+                                Some(Fd::Virtual(v)) => {
+                                    if !v.borrow().write {
+                                        errno(9)
+                                    } else {
+                                        let memory = process.memory.borrow();
+                                        if memory
+                                            .check(args[1], args[2] as usize * 16, Access::Read)
+                                            .is_err()
+                                        {
+                                            errno(14)
+                                        } else {
+                                            let mut total = 0;
+                                            for n in 0..args[2] {
+                                                let address = memory.load(args[1] + n * 16, 8)?;
+                                                let length =
+                                                    memory.load(args[1] + n * 16 + 8, 8)?;
+                                                if length > 0x7ffff000
+                                                    || total + length > 0x7ffff000
+                                                {
+                                                    total = errno(22);
+                                                    break;
+                                                }
+                                                if memory
+                                                    .check(address, length as usize, Access::Read)
+                                                    .is_err()
+                                                {
+                                                    total = errno(14);
+                                                    break;
+                                                }
+                                                total += length;
+                                            }
+                                            total
+                                        }
+                                    }
+                                }
                                 Some(Fd::Writer(pipe)) => {
                                     let result = pipe_writev(
                                         &process.memory.borrow(),
@@ -1049,15 +1160,27 @@ pub(super) fn run(
                         match path {
                             Err(_) => errno(14),
                             Ok(path) => {
-                                if nr == 267 && args[0] as i32 != -100 && !path.starts_with('/') {
-                                    return Err(Error::UnsupportedSyscall(number));
-                                }
-                                let target = if path == "/proc/self/exe" {
-                                    Ok(process.executable.clone())
+                                let cwd = match directory_cwd(
+                                    config,
+                                    &process,
+                                    if nr == 267 { args[0] as i32 } else { -100 },
+                                    &path,
+                                ) {
+                                    Ok(cwd) => cwd,
+                                    Err(error) => {
+                                        process.cpu.cpu().set_result(error);
+                                        continue;
+                                    }
+                                };
+                                let absolute = virtual_fs::path(&cwd, &path);
+                                let target = if let Some(target) =
+                                    virtual_fs::link_target(&process, &absolute)
+                                {
+                                    Ok(target)
                                 } else {
                                     blink_host::read_link(
                                         &config.rootfs,
-                                        &process.cwd.borrow(),
+                                        &cwd,
                                         std::path::Path::new(&path),
                                     )
                                 };
@@ -1328,8 +1451,58 @@ pub(super) fn run(
                         match path {
                             Err(_) => errno(14),
                             Ok(path) => {
-                                if nr == 257 && args[0] as i32 != -100 && !path.starts_with('/') {
-                                    return Err(Error::UnsupportedSyscall(number));
+                                let cwd = match directory_cwd(
+                                    config,
+                                    &process,
+                                    if nr == 257 { args[0] as i32 } else { -100 },
+                                    &path,
+                                ) {
+                                    Ok(cwd) => cwd,
+                                    Err(error) => {
+                                        process.cpu.cpu().set_result(error);
+                                        continue;
+                                    }
+                                };
+                                let absolute = virtual_fs::path(&cwd, &path);
+                                let path = if let Some(target) =
+                                    virtual_fs::link_target(&process, &absolute)
+                                {
+                                    if flags & 0x20000 != 0 {
+                                        process.cpu.cpu().set_result(errno(40));
+                                        continue;
+                                    }
+                                    if target.is_absolute() {
+                                        target.to_string_lossy().into_owned()
+                                    } else {
+                                        path
+                                    }
+                                } else {
+                                    path
+                                };
+                                let absolute = virtual_fs::path(&cwd, &path);
+                                if let Some(node) =
+                                    virtual_fs::lookup(&process, &processes, &absolute)
+                                {
+                                    let result =
+                                        match node.and_then(|node| virtual_fs::open(node, flags)) {
+                                            Err(error) => error,
+                                            Ok(node) => {
+                                                if let Some(fd) = process.fd() {
+                                                    process.fds.borrow_mut().insert(fd, node);
+                                                    if flags & 0x80000 != 0 {
+                                                        process
+                                                            .descriptor_flags
+                                                            .borrow_mut()
+                                                            .insert(fd);
+                                                    }
+                                                    fd as u64
+                                                } else {
+                                                    errno(24)
+                                                }
+                                            }
+                                        };
+                                    process.cpu.cpu().set_result(result);
+                                    continue;
                                 }
                                 if flags
                                     & !(3
@@ -1347,7 +1520,7 @@ pub(super) fn run(
                                 }
                                 let existing = blink_host::path_stat(
                                     &config.rootfs,
-                                    &process.cwd.borrow(),
+                                    &cwd,
                                     std::path::Path::new(&path),
                                     true,
                                     config.rootless_metadata,
@@ -1364,7 +1537,7 @@ pub(super) fn run(
                                 } else if let Some(fd) = process.fd() {
                                     match open_file(
                                         config,
-                                        &process.cwd.borrow(),
+                                        &cwd,
                                         &path,
                                         flags,
                                         mode & !(process.umask.get() as u64),
@@ -1389,6 +1562,34 @@ pub(super) fn run(
                         let fd = process.fds.borrow().get(&(args[0] as i32)).cloned();
                         match fd.as_ref() {
                             None => errno(9),
+                            Some(Fd::Virtual(v)) => {
+                                let mut v = v.borrow_mut();
+                                match &mut v.content {
+                                    VirtualContent::Bytes(cursor) => {
+                                        let seek = match args[2] {
+                                            0 if args[1] <= i64::MAX as u64 => {
+                                                Some(SeekFrom::Start(args[1]))
+                                            }
+                                            1 => Some(SeekFrom::Current(args[1] as i64)),
+                                            2 => Some(SeekFrom::End(args[1] as i64)),
+                                            _ => None,
+                                        };
+                                        match seek {
+                                            Some(seek) => cursor
+                                                .seek(seek)
+                                                .unwrap_or_else(|e| blink_linux::errno(&e)),
+                                            None => errno(22),
+                                        }
+                                    }
+                                    VirtualContent::Directory { position, .. }
+                                        if args[1] == 0 && args[2] == 0 =>
+                                    {
+                                        *position = 0;
+                                        0
+                                    }
+                                    _ => errno(29),
+                                }
+                            }
                             Some(Fd::Directory(directory)) => {
                                 if args[2] == 1 && args[1] == 0 {
                                     directory.borrow().position
@@ -1425,6 +1626,37 @@ pub(super) fn run(
                             _ => errno(29),
                         }
                     }
+                    73..=75 | 77 => {
+                        let result = match process.fds.borrow().get(&(args[0] as i32)) {
+                            None => Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+                            Some(Fd::File { file, write, .. }) => {
+                                if nr == 77 && (!write || args[1] > i64::MAX as u64) {
+                                    Err(std::io::ErrorKind::InvalidInput.into())
+                                } else {
+                                    file_control(&file.borrow(), nr, args[1])
+                                }
+                            }
+                            Some(Fd::Directory(d)) if nr != 77 => {
+                                file_control(&d.borrow().file, nr, args[1])
+                            }
+                            _ => Err(std::io::ErrorKind::InvalidInput.into()),
+                        };
+                        match result {
+                            Ok(()) => 0,
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => errno(9),
+                            Err(e)
+                                if nr == 73
+                                    && args[1] & 4 == 0
+                                    && e.kind() == std::io::ErrorKind::WouldBlock =>
+                            {
+                                process.pending = Some((number, args));
+                                event = Event::Blocked;
+                                break;
+                            }
+                            Err(e) => blink_linux::errno(&e),
+                        }
+                    }
+                    137 | 138 => filesystem_info(config, &process, nr, args)?,
                     280 => change_times(config, &process, args)?,
                     92..=94 | 260 => change_owner(config, &process, nr, args)?,
                     217 => read_directory(&process, args)?,
@@ -1456,6 +1688,26 @@ pub(super) fn run(
                     80 => {
                         let path = cstring(&process.memory.borrow(), args[0]);
                         let cwd = process.cwd.borrow().clone();
+                        if let Ok(path) = &path {
+                            let absolute = virtual_fs::path(&cwd, path);
+                            if let Some(node) = virtual_fs::lookup(&process, &processes, &absolute)
+                            {
+                                let result = match node {
+                                    Err(error) => error,
+                                    Ok(node) => {
+                                        if matches!(node.content, VirtualContent::Directory { .. })
+                                        {
+                                            *process.cwd.borrow_mut() = absolute;
+                                            0
+                                        } else {
+                                            errno(20)
+                                        }
+                                    }
+                                };
+                                process.cpu.cpu().set_result(result);
+                                continue;
+                            }
+                        }
                         match path {
                             Err(_) => errno(14),
                             Ok(path) => match blink_host::resolve_from(
@@ -1561,6 +1813,7 @@ pub(super) fn run(
                             let child_pid = next_pid;
                             next_pid = next_pid.checked_add(1).ok_or(Error::ResourceLimit)?;
                             let mut child = process.clone();
+                            child.tid = child_pid;
                             child.clear_tid = 0;
                             child.robust_head = 0;
                             child.pending_signals = 0;
@@ -1730,6 +1983,8 @@ pub(super) fn run(
                                             );
                                             process.memory = Rc::new(RefCell::new(new.memory));
                                             process.executable = new.executable;
+                                            process.argv = new.argv;
+                                            process.env = env.clone();
                                             process.robust_head = 0;
                                             process.clear_tid = 0;
                                             process.heap =
@@ -1860,6 +2115,36 @@ pub(super) fn run(
                             } else {
                                 match (nr, &fd) {
                                     (0, Fd::Stdin) => 0,
+                                    (_, Fd::Virtual(v)) => {
+                                        let mut v = v.borrow_mut();
+                                        if (nr == 0 && !v.read) || (nr == 1 && !v.write) {
+                                            errno(9)
+                                        } else if nr == 1 {
+                                            count as u64
+                                        } else {
+                                            let mut bytes = vec![0; count.min(65536)];
+                                            let read = match &mut v.content {
+                                                VirtualContent::Null => 0,
+                                                VirtualContent::Zero => bytes.len(),
+                                                VirtualContent::Random => {
+                                                    blink_host::fill_random(&mut bytes)?;
+                                                    bytes.len()
+                                                }
+                                                VirtualContent::Bytes(cursor) => {
+                                                    cursor.read(&mut bytes)?
+                                                }
+                                                VirtualContent::Directory { .. } => {
+                                                    process.cpu.cpu().set_result(errno(21));
+                                                    continue;
+                                                }
+                                            };
+                                            process
+                                                .memory
+                                                .borrow_mut()
+                                                .write(args[1], &bytes[..read])?;
+                                            read as u64
+                                        }
+                                    }
                                     (0, Fd::Directory(_)) => errno(21),
                                     (_, Fd::UnixSocket { .. }) => errno(107),
                                     (
@@ -2202,7 +2487,7 @@ fn deliver_signal(process: &mut Process) -> Result<Option<i32>> {
             Engine::X86(cpu) => {
                 if let Some(number) = blocked {
                     if action.flags & 0x10000000 != 0
-                        && matches!(number, 0 | 1 | 20 | 40 | 61 | 202)
+                        && matches!(number, 0 | 1 | 20 | 40 | 61 | 73 | 202)
                     {
                         cpu.rip = cpu.rip.wrapping_sub(2);
                         cpu.regs[0] = number;
@@ -2324,7 +2609,9 @@ fn map_memory(
     if args[1] > config.max_memory as u64 {
         return Ok(errno(12));
     }
-    let size = (args[1] + 4095) & !4095;
+    let Some(size) = args[1].checked_add(4095).map(|size| size & !4095) else {
+        return Ok(errno(12));
+    };
     let address = if fixed || exclusive {
         args[0]
     } else {
@@ -2460,6 +2747,7 @@ fn pipe_writev(
 
 fn poll_events(fd: Option<&Fd>, wanted: u16) -> u16 {
     let available = match fd {
+        Some(Fd::Virtual(_)) => 1 | 4 | 64 | 256,
         None => return 32, // POLLNVAL
         Some(Fd::Reader(p)) => {
             let p = p.borrow();
@@ -2537,10 +2825,33 @@ fn filesystem_mutation(
     } else {
         String::new()
     };
-    if (dir1 != -100 && !first.starts_with('/')) || (dir2 != -100 && !second.starts_with('/')) {
-        return Err(Error::UnsupportedSyscall(nr));
+    let cwd = match directory_cwd(config, process, dir1, &first) {
+        Ok(cwd) => cwd,
+        Err(error) => return Ok(error),
+    };
+    let dest_cwd = match directory_cwd(config, process, dir2, &second) {
+        Ok(cwd) => cwd,
+        Err(error) => return Ok(error),
+    };
+    for path in [
+        if operation == 88 {
+            None
+        } else {
+            Some(virtual_fs::path(&cwd, &first))
+        },
+        if matches!(operation, 82 | 86 | 88) {
+            Some(virtual_fs::path(&dest_cwd, &second))
+        } else {
+            None
+        },
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(fs) = virtual_fs::filesystem(&path) {
+            return Ok(errno(if fs.readonly { 30 } else { 1 }));
+        }
     }
-    let cwd = process.cwd.borrow();
     let result = (|| -> std::io::Result<()> {
         let root = &config.rootfs;
         if operation == 83
@@ -2581,11 +2892,27 @@ fn filesystem_mutation(
             90 => blink_host::metadata::Target::Path(&path)
                 .chmod(mode as u32, config.rootless_metadata),
             82 | 86 | 88 => {
-                let dest = blink_host::entry_path(root, &cwd, std::path::Path::new(&second))?;
+                let dest = blink_host::entry_path(root, &dest_cwd, std::path::Path::new(&second))?;
                 match operation {
                     82 => std::fs::rename(path, dest),
                     86 => std::fs::hard_link(path, dest),
-                    _ => blink_host::symlink(&path, &dest),
+                    _ => {
+                        blink_host::symlink(&path, &dest)?;
+                        if config.rootless_metadata {
+                            let parent = blink_host::metadata::Target::Path(dest.parent().unwrap())
+                                .stat(true)?;
+                            blink_host::metadata::Target::Path(&dest).chown(
+                                process.credentials.euid,
+                                if parent.mode & 0o2000 != 0 {
+                                    parent.gid
+                                } else {
+                                    process.credentials.egid
+                                },
+                                true,
+                            )?;
+                        }
+                        Ok(())
+                    }
                 }
             }
             _ => unreachable!(),
@@ -2618,7 +2945,11 @@ fn send_file(
         Fd::File { write: false, .. } | Fd::Reader(_) | Fd::Stdin => return Ok(Some(errno(9))),
         Fd::File { append: true, .. } => return Ok(Some(errno(22))),
         Fd::File { file: out, .. } if Rc::ptr_eq(file, out) => return Ok(Some(errno(22))),
-        _ => (),
+        Fd::Virtual(v) if v.borrow().write => (),
+        Fd::Stdout | Fd::Stderr | Fd::Writer(_) => (),
+        Fd::UnixSocket { .. } => return Ok(Some(errno(107))),
+        Fd::File { .. } => (),
+        _ => return Ok(Some(errno(9))),
     }
     let explicit_offset = args[2] != 0;
     let offset = if explicit_offset {
@@ -2655,6 +2986,7 @@ fn send_file(
         Err(e) => return Ok(Some(blink_linux::errno(&e))),
     };
     let wrote = match output {
+        Fd::Virtual(_) => read,
         Fd::Stdout => {
             stdout.write_all(&bytes[..read])?;
             read
@@ -2692,6 +3024,35 @@ fn release_vfork(process: &mut Process, processes: &mut BTreeMap<u32, Process>) 
 
 fn read_directory(process: &Process, args: [u64; 6]) -> Result<u64> {
     let fds = process.fds.borrow();
+    if let Some(Fd::Virtual(v)) = fds.get(&(args[0] as i32)) {
+        let count = args[2].min(65536) as usize;
+        if process
+            .memory
+            .borrow()
+            .check(args[1], count, Access::Write)
+            .is_err()
+        {
+            return Ok(errno(14));
+        }
+        let mut v = v.borrow_mut();
+        let VirtualContent::Directory { entries, position } = &mut v.content else {
+            return Ok(errno(20));
+        };
+        let mut bytes = Vec::new();
+        while let Some(entry) = entries.get(*position) {
+            let length = (19 + entry.name.len() + 1 + 7) & !7;
+            if bytes.len() + length > count {
+                if bytes.is_empty() {
+                    return Ok(errno(22));
+                }
+                break;
+            }
+            append_dirent(&mut bytes, entry, *position as u64 + 1);
+            *position += 1;
+        }
+        process.memory.borrow_mut().write(args[1], &bytes)?;
+        return Ok(bytes.len() as u64);
+    }
     let directory = match fds.get(&(args[0] as i32)) {
         None => return Ok(errno(9)),
         Some(Fd::Directory(d)) => d,
@@ -2726,13 +3087,7 @@ fn read_directory(process: &Process, args: [u64; 6]) -> Result<u64> {
             }
             break;
         }
-        let offset = bytes.len();
-        bytes.resize(offset + length, 0);
-        bytes[offset..offset + 8].copy_from_slice(&entry.inode.to_le_bytes());
-        bytes[offset + 8..offset + 16].copy_from_slice(&(directory.position + 1).to_le_bytes());
-        bytes[offset + 16..offset + 18].copy_from_slice(&(length as u16).to_le_bytes());
-        bytes[offset + 18] = entry.kind;
-        bytes[offset + 19..offset + 19 + entry.name.len()].copy_from_slice(&entry.name);
+        append_dirent(&mut bytes, &entry, directory.position + 1);
         directory.advance();
     }
     process.memory.borrow_mut().write(args[1], &bytes)?;
@@ -2795,6 +3150,15 @@ fn change_times(config: &RuntimeConfig, process: &Process, args: [u64; 6]) -> Re
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     if args[3] & !256 != 0 {
         return Err(Error::UnsupportedSyscall(280));
+    }
+    if args[2] != 0
+        && process
+            .memory
+            .borrow()
+            .check(args[2], 32, Access::Read)
+            .is_err()
+    {
+        return Ok(errno(14));
     }
     let mut times = std::fs::FileTimes::new();
     let now = SystemTime::now();
@@ -2876,6 +3240,167 @@ fn change_times(config: &RuntimeConfig, process: &Process, args: [u64; 6]) -> Re
         }
     };
     Ok(result.map_or_else(|e| blink_linux::errno(&e), |_| 0))
+}
+
+fn filesystem_info(
+    config: &RuntimeConfig,
+    process: &Process,
+    nr: u64,
+    args: [u64; 6],
+) -> Result<u64> {
+    let virtual_path = if nr == 138 {
+        match process.fds.borrow().get(&(args[0] as i32)) {
+            Some(Fd::Virtual(v)) => Some(v.borrow().path.clone()),
+            _ => None,
+        }
+    } else {
+        match cstring(&process.memory.borrow(), args[0]) {
+            Ok(path) => Some(virtual_fs::path(&process.cwd.borrow(), &path)),
+            Err(_) => return Ok(errno(14)),
+        }
+    };
+    if let Some(path) = virtual_path {
+        if let Some(info) = virtual_fs::filesystem(&path) {
+            if nr == 137 {
+                if let Some(Err(error)) = virtual_fs::lookup(process, &BTreeMap::new(), &path) {
+                    return Ok(error);
+                }
+            }
+            return Ok(
+                if process
+                    .memory
+                    .borrow_mut()
+                    .write(args[1], &blink_linux::statfs_bytes(&info))
+                    .is_ok()
+                {
+                    0
+                } else {
+                    errno(14)
+                },
+            );
+        }
+    }
+    let info = if nr == 138 {
+        match process.fds.borrow().get(&(args[0] as i32)) {
+            None => return Ok(errno(9)),
+            Some(Fd::File { file, .. }) => blink_host::filesystem_stat(&file.borrow()),
+            Some(Fd::Directory(d)) => blink_host::filesystem_stat(&d.borrow().file),
+            _ => return Err(Error::UnsupportedSyscall(nr)),
+        }
+    } else {
+        let path = match cstring(&process.memory.borrow(), args[0]) {
+            Ok(p) => p,
+            Err(_) => return Ok(errno(14)),
+        };
+        blink_host::resolve_from(
+            &config.rootfs,
+            &process.cwd.borrow(),
+            std::path::Path::new(&path),
+            false,
+        )
+        .and_then(std::fs::File::open)
+        .and_then(|f| blink_host::filesystem_stat(&f))
+    };
+    Ok(match info {
+        Err(e) => blink_linux::errno(&e),
+        Ok(info) => {
+            if process
+                .memory
+                .borrow_mut()
+                .write(args[1], &blink_linux::statfs_bytes(&info))
+                .is_ok()
+            {
+                0
+            } else {
+                errno(14)
+            }
+        }
+    })
+}
+
+fn directory_cwd(
+    config: &RuntimeConfig,
+    process: &Process,
+    fd: i32,
+    path: &str,
+) -> std::result::Result<std::path::PathBuf, u64> {
+    if path.starts_with('/') {
+        return Ok(std::path::PathBuf::from("/"));
+    }
+    if fd == -100 {
+        return Ok(process.cwd.borrow().clone());
+    }
+    match process.fds.borrow().get(&fd) {
+        None => Err(errno(9)),
+        Some(Fd::Virtual(v)) => {
+            let v = v.borrow();
+            if matches!(v.content, VirtualContent::Directory { .. }) {
+                Ok(v.path.clone())
+            } else {
+                Err(errno(20))
+            }
+        }
+        Some(Fd::Directory(directory)) => directory
+            .borrow()
+            .path
+            .strip_prefix(&config.rootfs)
+            .map(|p| std::path::Path::new("/").join(p))
+            .map_err(|_| errno(2)),
+        _ => Err(errno(20)),
+    }
+}
+
+fn file_control(file: &std::fs::File, nr: u64, value: u64) -> std::io::Result<()> {
+    match nr {
+        73 => blink_host::flock(file, value),
+        74 => file.sync_all(),
+        75 => file.sync_data(),
+        77 => file.set_len(value),
+        _ => unreachable!(),
+    }
+}
+
+fn append_dirent(bytes: &mut Vec<u8>, entry: &blink_host::DirectoryEntry, next: u64) {
+    let length = (19 + entry.name.len() + 1 + 7) & !7;
+    let offset = bytes.len();
+    bytes.resize(offset + length, 0);
+    bytes[offset..offset + 8].copy_from_slice(&entry.inode.to_le_bytes());
+    bytes[offset + 8..offset + 16].copy_from_slice(&next.to_le_bytes());
+    bytes[offset + 16..offset + 18].copy_from_slice(&(length as u16).to_le_bytes());
+    bytes[offset + 18] = entry.kind;
+    bytes[offset + 19..offset + 19 + entry.name.len()].copy_from_slice(&entry.name);
+}
+
+fn access_mode(
+    stat: &blink_host::FileStat,
+    credentials: &blink_linux::Credentials,
+    mode: u32,
+    effective: bool,
+) -> u64 {
+    let (uid, gid) = if effective {
+        (credentials.euid, credentials.egid)
+    } else {
+        (credentials.uid, credentials.gid)
+    };
+    if uid == 0 {
+        return if mode & 1 != 0 && stat.mode & 0o170000 != 0o040000 && stat.mode & 0o111 == 0 {
+            errno(13)
+        } else {
+            0
+        };
+    }
+    let shift = if uid == stat.uid {
+        6
+    } else if gid == stat.gid || credentials.groups.contains(&stat.gid) {
+        3
+    } else {
+        0
+    };
+    if (stat.mode >> shift) & mode == mode {
+        0
+    } else {
+        errno(13)
+    }
 }
 
 #[cfg(test)]

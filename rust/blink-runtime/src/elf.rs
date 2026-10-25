@@ -12,6 +12,7 @@ fn field(bytes: &[u8], off: usize, n: usize) -> Result<u64> {
 }
 pub struct Image {
     pub executable: std::path::PathBuf,
+    pub argv: Vec<String>,
     pub memory: Memory,
     pub entry: u64,
     pub stack: u64,
@@ -254,6 +255,7 @@ pub fn load(
     }
     Ok(Image {
         executable: std::path::PathBuf::new(),
+        argv: args.to_vec(),
         memory,
         entry,
         stack: sp,

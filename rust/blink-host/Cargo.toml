@@ -10,3 +10,4 @@ workspace = true
 
 [dependencies]
 xattr = "1.6.1"
+rustix = { version = "1.1.5", features = ["fs"] }

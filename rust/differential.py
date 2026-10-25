@@ -3,7 +3,7 @@
 import argparse, hashlib, json, platform, subprocess, time, tempfile
 from pathlib import Path
 root=Path(__file__).resolve().parent.parent
-p=argparse.ArgumentParser();p.add_argument('--c-blink',type=Path,default=root/'o/blink/blink');p.add_argument('--output',type=Path,default=root/'target/differential');a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--rust-native-only',action='store_true');p.add_argument('--c-blink',type=Path,default=root/'o/blink/blink');p.add_argument('--output',type=Path,default=root/'target/differential');a=p.parse_args()
 a.output.mkdir(parents=True,exist_ok=True)
 subprocess.run(['cargo','build','--offline','-p','blink-cli'],cwd=root,check=True)
 fixtures={}
@@ -18,7 +18,8 @@ for name in ['integer', 'descriptors', 'filesystem', 'restart']:
 path=a.output/'libc-x86_64'
 subprocess.run(['cc','-static','-O2','-Wl,--build-id=none','-o',str(path),str(root/'rust/fixtures/libc-x86_64.c')],check=True)
 fixtures['libc']=path.resolve()
-engines={'rust':[str(root/'target/debug/blink-cli')],'c-interpreter':[str(a.c_blink.resolve()),'-j'],'c-jit':[str(a.c_blink.resolve())]}
+engines={'rust':[str(root/'target/debug/blink-cli')]}
+if not a.rust_native_only:engines.update({'c-interpreter':[str(a.c_blink.resolve()),'-j'],'c-jit':[str(a.c_blink.resolve())]})
 if platform.system()=='Linux' and platform.machine()=='x86_64':engines['native']=[]
 results=[]
 failed=False

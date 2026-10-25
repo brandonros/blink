@@ -379,3 +379,97 @@ fn files_persist_but_cwd_resets_between_runs() {
         .unwrap();
     assert_eq!(fs::read(r.0.join("state")).unwrap(), b"saved\n");
 }
+
+fn read_path_guest(path: &str) -> Vec<u8> {
+    let mut code = vec![0xb8, 1, 1, 0, 0, 0xbf, 156, 255, 255, 255, 0x48, 0xbe];
+    code.extend(0x402000u64.to_le_bytes());
+    code.extend([0x31, 0xd2, 0x45, 0x31, 0xd2, 0x0f, 0x05, 0x89, 0xc7]);
+    code.extend([
+        0x48, 0x81, 0xec, 0, 16, 0, 0, 0x48, 0x89, 0xe6, 0xba, 0, 16, 0, 0, 0x31, 0xc0, 0x0f, 0x05,
+    ]);
+    code.extend([
+        0x48, 0x89, 0xc2, 0xbf, 1, 0, 0, 0, 0xb8, 1, 0, 0, 0, 0x0f, 0x05,
+    ]);
+    code.extend(xexit(0));
+    code.resize(4096, 0);
+    code.extend(path.as_bytes());
+    code.push(0);
+    elf(GuestArch::X86_64, &code)
+}
+#[test]
+fn virtual_proc_contains_only_guest_state_and_resets_between_runs() {
+    let root = Root::new();
+    root.write("status", &read_path_guest("/proc/self/status"));
+    root.write("environ", &read_path_guest("/proc/self/environ"));
+    let mut runtime = root.runtime(GuestArch::X86_64);
+    for uid in [123, 7] {
+        let mut output = Vec::new();
+        runtime
+            .run_with_io(
+                Command::new("status").uid(uid).gid(456),
+                &mut output,
+                &mut std::io::sink(),
+            )
+            .unwrap()
+            .ensure_success()
+            .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("Pid:\t1\n"));
+        assert!(text.contains(&format!("Uid:\t{uid}\t{uid}\t{uid}\t{uid}\n")));
+        assert!(text.contains("Gid:\t456\t456\t456\t456\n"));
+    }
+    let mut output = Vec::new();
+    runtime
+        .run_with_io(
+            Command::new("environ").envs([("ONLY", "guest")]),
+            &mut output,
+            &mut std::io::sink(),
+        )
+        .unwrap()
+        .ensure_success()
+        .unwrap();
+    assert_eq!(output, b"ONLY=guest\0");
+    assert!(!root.0.join("proc").exists());
+}
+#[test]
+fn virtual_devices_work_without_host_nodes() {
+    let root = Root::new();
+    root.write("zero", &read_path_guest("/dev/zero"));
+    root.write("null", &read_path_guest("/dev/null"));
+    let mut runtime = root.runtime(GuestArch::X86_64);
+    let (result, output) = capture(&mut runtime, "zero");
+    result.ensure_success().unwrap();
+    assert!(output.iter().all(|b| *b == 0));
+    assert!(!output.is_empty());
+    let (result, output) = capture(&mut runtime, "null");
+    result.ensure_success().unwrap();
+    assert!(output.is_empty());
+    assert!(!root.0.join("dev").exists());
+}
+
+#[test]
+fn overflowing_syscall_pointer_returns_efault_without_poisoning_context() {
+    let root = Root::new();
+    let mut runtime = root.runtime(GuestArch::X86_64);
+    for pointer in [u64::MAX, u64::MAX - 8, u64::MAX - 16, u64::MAX - 31] {
+        let mut code = vec![0xb8, 0x18, 1, 0, 0, 0x31, 0xff, 0x31, 0xf6, 0x48, 0xba];
+        code.extend(pointer.to_le_bytes());
+        code.extend([
+            0x45, 0x31, 0xd2, 0x0f, 0x05, 0xf7, 0xd8, 0x89, 0xc7, 0xb8, 60, 0, 0, 0, 0x0f, 0x05,
+        ]);
+        root.write("bad-pointer", &elf(GuestArch::X86_64, &code));
+        assert_eq!(
+            runtime
+                .run(Command::new("bad-pointer"))
+                .unwrap()
+                .termination,
+            Termination::Exited(14)
+        );
+    }
+    root.write("good", &elf(GuestArch::X86_64, &xexit(0)));
+    runtime
+        .run(Command::new("good"))
+        .unwrap()
+        .ensure_success()
+        .unwrap();
+}

@@ -7,7 +7,25 @@ pub struct Pipe {
     pub readers: usize,
     pub writers: usize,
 }
+pub enum VirtualContent {
+    Bytes(std::io::Cursor<Vec<u8>>),
+    Directory {
+        entries: Vec<blink_host::DirectoryEntry>,
+        position: usize,
+    },
+    Null,
+    Zero,
+    Random,
+}
+pub struct VirtualOpen {
+    pub path: std::path::PathBuf,
+    pub stat: blink_host::FileStat,
+    pub content: VirtualContent,
+    pub read: bool,
+    pub write: bool,
+}
 pub enum Fd {
+    Virtual(Rc<RefCell<VirtualOpen>>),
     Directory(Rc<RefCell<blink_host::Directory>>),
     UnixSocket {
         inode: u64,
@@ -29,6 +47,7 @@ pub enum Fd {
 impl Clone for Fd {
     fn clone(&self) -> Self {
         match self {
+            Self::Virtual(v) => Self::Virtual(v.clone()),
             Self::Directory(d) => Self::Directory(d.clone()),
             Self::UnixSocket { inode, nonblock } => Self::UnixSocket {
                 inode: *inode,
@@ -119,6 +138,7 @@ impl Fd {
     pub fn stat(&self, rootless: bool) -> std::io::Result<blink_host::FileStat> {
         use blink_host::FileStat;
         match self {
+            Self::Virtual(v) => Ok(v.borrow().stat.clone()),
             Self::File { file, .. } => {
                 blink_host::metadata::Target::File(&file.borrow()).stat(rootless)
             }
@@ -209,4 +229,26 @@ impl Credentials {
             groups: Vec::new(),
         }
     }
+}
+
+/// Both supported 64-bit Linux guest ABIs use this statfs layout.
+pub fn statfs_bytes(stat: &blink_host::FilesystemStat) -> [u8; 120] {
+    let mut bytes = [0; 120];
+    let fields = [
+        stat.kind,
+        stat.block_size,
+        stat.blocks,
+        stat.free_blocks,
+        stat.available_blocks,
+        stat.files,
+        stat.free_files,
+        stat.id,
+        stat.name_max,
+        stat.fragment_size,
+        0x26 | u64::from(stat.readonly),
+    ];
+    for (n, value) in fields.iter().enumerate() {
+        bytes[n * 8..n * 8 + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    bytes
 }
