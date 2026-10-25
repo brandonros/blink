@@ -173,7 +173,7 @@ The preexisting C executable, config, clean-build log and hash manifest are in
 `o/rust-reference` directory. On this Linux x86_64 host, Rust, C interpreter and
 native Linux comparisons retain per-fixture results. The expanded filesystem,
 MXCSR restart, socketpair and alternate-stack cases expose additional C baseline
-differences; consult the report rather than treating the C runtime as the oracle. All 21 fixtures pass Rust/native. C differs on vfork memory sharing and
+differences; consult the report rather than treating the C runtime as the oracle. All 22 fixtures pass Rust/native. C differs on vfork memory sharing and
 returns extra F_GETFL flags on a CLOEXEC pipe in the descriptor fixture. C JIT fails the pipe/fork
 fixture and crashes during the exec fixture, including after a clean rebuild.
 Those failures remain visible; C is a comparison target, not an infallible oracle.
@@ -259,7 +259,7 @@ children, and remain through exec. Threads share their process timer; pending
 standard signals coalesce. Wall/monotonic clock queries use host clock adapters.
 Nanosleep and absolute/relative clock_nanosleep cooperate with scheduling and
 write remaining time on interruption. Virtual/profiling CPU timers and other
-clock IDs remain unsupported. The native comparison suite now has 21 compiled
+clock IDs remain unsupported. The native comparison suite now has 22 compiled
 fixtures, including real-timer delivery, fork inheritance, and interrupted sleep.
 
 Packed conversion memory operands are checked at their architectural width: CVTDQ2PD and CVTPS2PD read eight bytes, even though the decoder reports a 16-byte vector width. Page-boundary and unmasked-exception tests guard source accesses and whole-destination preservation.
@@ -324,7 +324,7 @@ manifest is `sha256:025b8e975a61d94e33abeafaad1255ef44e4898cf1a1b6446860009c72e6
 the Node executable SHA-256 is `5a92a46a1d8279fec6776e3123ca22e26a6fddbb7cf1b55e019dbb38eea8ff26`.
 This is not yet a JavaScript execution gate: the current `--jitless -p '1 + 2'`
 probe has progressed through thread startup and SIMD/conditional-move feature checks,
-and currently stops at an mremap probe.
+and progresses through V8 heap initialization; the 60-second probe timed out.
 The feature qualifications are documented in [CPU-FEATURES.md](CPU-FEATURES.md). CLI `--max-memory BYTES` and `--max-image-size BYTES`
 expose existing runtime limits for this 130 MB executable.
 
@@ -417,3 +417,12 @@ bytes; threads and vfork retain their shared address space. The native fixture
 checks partial-page rounding, PROT_NONE, inheritance restoration and parent/child
 isolation. Guest sysinfo reports runtime memory limits/free budget, task count
 and elapsed run time, with no guest swap or host memory statistics.
+
+
+Private anonymous mremap supports in-place resize, MAYMOVE and FIXED replacement,
+preserving data, protections and fork inheritance. New pages are zero-filled,
+shrunk ranges are unmapped, and aggregate runtime limits remain enforced.
+File-backed mappings can move/shrink, but extending them remains unsupported;
+DONTUNMAP, shared mappings and full Linux VMA split/merge behavior are not covered.
+The native remap fixture checks blocked growth, moves, replacement, invalid ranges,
+read-only pages, fork advice and shrink behavior.

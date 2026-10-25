@@ -36,7 +36,7 @@ pub enum Access {
     Write,
     Execute,
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Permissions {
     pub read: bool,
     pub write: bool,
@@ -68,23 +68,39 @@ struct Page {
     permissions: Permissions,
     bus_fault: bool,
     inherit_on_fork: bool,
+    anonymous: bool,
+    mapping: u64,
 }
 #[derive(Clone)]
 pub struct Memory {
     pages: BTreeMap<u64, Page>,
     max_pages: usize,
+    next_mapping: u64,
 }
 impl Memory {
     pub fn new(max_bytes: usize) -> Self {
         Self {
             pages: BTreeMap::new(),
             max_pages: max_bytes / 4096,
+            next_mapping: 1,
         }
     }
     pub fn mapped_bytes(&self) -> usize {
         self.pages.len() * 4096
     }
     pub fn map(&mut self, start: u64, size: u64, permissions: Permissions) -> Result<()> {
+        self.map_kind(start, size, permissions, false)
+    }
+    pub fn map_anonymous(&mut self, start: u64, size: u64, permissions: Permissions) -> Result<()> {
+        self.map_kind(start, size, permissions, true)
+    }
+    fn map_kind(
+        &mut self,
+        start: u64,
+        size: u64,
+        permissions: Permissions,
+        anonymous: bool,
+    ) -> Result<()> {
         if size == 0 {
             return Ok(());
         }
@@ -110,9 +126,12 @@ impl Memory {
                     permissions,
                     bus_fault: false,
                     inherit_on_fork: true,
+                    anonymous,
+                    mapping: self.next_mapping,
                 },
             );
         }
+        self.next_mapping += 1;
         Ok(())
     }
     /// Deep-copy inherited mappings for a Linux fork. Ordinary Clone remains
@@ -126,6 +145,7 @@ impl Memory {
                 .map(|(address, page)| (*address, page.clone()))
                 .collect(),
             max_pages: self.max_pages,
+            next_mapping: self.next_mapping,
         }
     }
     pub fn fork_bytes(&self) -> usize {
@@ -151,6 +171,106 @@ impl Memory {
         }
         for (_, page) in self.pages.range_mut(address / PAGE..end / PAGE) {
             page.inherit_on_fork = inherit;
+        }
+        Ok(())
+    }
+    /// Validate that a remap range stays within one mapping with uniform state.
+    /// Returns whether extension with zero-filled pages is valid.
+    pub fn remap_source(&self, address: u64, size: u64) -> Result<bool> {
+        if address % PAGE != 0 || size == 0 || size % PAGE != 0 {
+            return Err(Error::InvalidConfig("unaligned remap".into()));
+        }
+        let end = address.checked_add(size).ok_or(Error::ResourceLimit)?;
+        let fault = || Error::MemoryFault {
+            address,
+            access: Access::Read,
+        };
+        let first = self.pages.get(&(address / PAGE)).ok_or_else(fault)?;
+        if self.mapped_in_range(address, size) as u64 != size
+            || self
+                .pages
+                .range(address / PAGE..end / PAGE)
+                .any(|(_, page)| {
+                    page.mapping != first.mapping
+                        || page.permissions != first.permissions
+                        || page.inherit_on_fork != first.inherit_on_fork
+                })
+        {
+            return Err(fault());
+        }
+        Ok(first.anonymous)
+    }
+    pub fn find_free_range(&self, mut address: u64, size: u64) -> Option<u64> {
+        if address % PAGE != 0 || size == 0 || size % PAGE != 0 {
+            return None;
+        }
+        loop {
+            let end = address.checked_add(size)?;
+            if end >= 0x800000000000 {
+                return None;
+            }
+            match self.pages.range(address / PAGE..end / PAGE).next_back() {
+                None => return Some(address),
+                Some((page, _)) => address = (page + 1).checked_mul(PAGE)?,
+            }
+        }
+    }
+    /// Move existing owned pages; additions inherit mapping permissions/advice.
+    /// The caller validates destination replacement and aggregate process limits.
+    pub fn remap(&mut self, old: u64, old_size: u64, new: u64, new_size: u64) -> Result<()> {
+        let anonymous = self.remap_source(old, old_size)?;
+        if new % PAGE != 0 || new_size == 0 || new_size % PAGE != 0 {
+            return Err(Error::InvalidConfig("unaligned remap destination".into()));
+        }
+        let end = new.checked_add(new_size).ok_or(Error::ResourceLimit)?;
+        if new != old && old < end && new < old + old_size {
+            return Err(Error::InvalidConfig("overlapping remap".into()));
+        }
+        if new_size > old_size && !anonymous {
+            return Err(Error::InvalidConfig("file-backed remap growth".into()));
+        }
+        if new == old
+            && new_size > old_size
+            && self.mapped_in_range(old + old_size, new_size - old_size) != 0
+        {
+            return Err(Error::InvalidConfig("occupied remap extension".into()));
+        }
+        let removed = if new == old {
+            self.mapped_in_range(old, old_size.max(new_size))
+        } else {
+            self.mapped_in_range(old, old_size) + self.mapped_in_range(new, new_size)
+        };
+        if self
+            .mapped_bytes()
+            .checked_sub(removed)
+            .and_then(|size| size.checked_add(new_size as usize))
+            .is_none_or(|size| size > self.max_pages * 4096)
+        {
+            return Err(Error::ResourceLimit);
+        }
+        let template = self.pages[&(old / PAGE)].clone();
+        let kept = old_size.min(new_size) / PAGE;
+        let mut pages = Vec::with_capacity((new_size / PAGE) as usize);
+        for n in 0..kept {
+            pages.push(self.pages.remove(&(old / PAGE + n)).unwrap());
+        }
+        self.unmap(old, old_size)?;
+        self.unmap(new, new_size)?;
+        let mut pages = pages.into_iter();
+        for n in 0..new_size / PAGE {
+            let page = if n < kept {
+                pages.next().unwrap()
+            } else {
+                Page {
+                    bytes: Box::new([0; 4096]),
+                    permissions: template.permissions,
+                    bus_fault: false,
+                    inherit_on_fork: template.inherit_on_fork,
+                    anonymous: template.anonymous,
+                    mapping: template.mapping,
+                }
+            };
+            self.pages.insert(new / PAGE + n, page);
         }
         Ok(())
     }

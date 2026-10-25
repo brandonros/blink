@@ -450,6 +450,7 @@ pub(super) fn run(
                         222 => 9,
                         226 => 10,
                         233 => 28,
+                        216 => 25,
                         179 => 99,
                         56 => 257,
                         62 => 8,
@@ -1752,7 +1753,7 @@ pub(super) fn run(
                                     process
                                         .memory
                                         .borrow_mut()
-                                        .map(old, new - old, Permissions::RW)
+                                        .map_anonymous(old, new - old, Permissions::RW)
                                         .is_ok()
                                 }
                             } else if new < old {
@@ -1786,6 +1787,7 @@ pub(super) fn run(
                             errno(14)
                         }
                     }
+                    25 => remap_memory(config, &process, &processes, args)?,
                     28 => {
                         if args[0] & 4095 != 0 || args[1].checked_add(4095).is_none() {
                             errno(22)
@@ -3354,6 +3356,91 @@ fn guest_executable(
     ))
 }
 
+fn remap_memory(
+    config: &RuntimeConfig,
+    process: &Process,
+    processes: &BTreeMap<u32, Process>,
+    args: [u64; 6],
+) -> Result<u64> {
+    let [old, old_size, new_size, flags, requested, _] = args;
+    if flags & !3 != 0 {
+        return Err(Error::UnsupportedSyscall(25));
+    }
+    if old & 4095 != 0
+        || old_size == 0
+        || new_size == 0
+        || flags & 2 != 0 && (flags & 1 == 0 || requested & 4095 != 0)
+    {
+        return Ok(errno(22));
+    }
+    let Some(old_size) = old_size.checked_add(4095).map(|n| n & !4095) else {
+        return Ok(errno(22));
+    };
+    let Some(new_size) = new_size.checked_add(4095).map(|n| n & !4095) else {
+        return Ok(errno(22));
+    };
+    let memory = process.memory.borrow();
+    let anonymous = match memory.remap_source(old, old_size) {
+        Ok(value) => value,
+        Err(_) => return Ok(errno(14)),
+    };
+    let fixed = flags & 2 != 0;
+    let new = if fixed {
+        requested
+    } else if new_size <= old_size
+        || memory.mapped_in_range(old + old_size, new_size - old_size) == 0
+    {
+        old
+    } else if flags & 1 != 0 {
+        match memory.find_free_range(process.heap.borrow().next_map, new_size) {
+            Some(address) => address,
+            None => return Ok(errno(12)),
+        }
+    } else {
+        return Ok(errno(12));
+    };
+    let Some(end) = new
+        .checked_add(new_size)
+        .filter(|end| *end < 0x800000000000)
+    else {
+        return Ok(errno(12));
+    };
+    if new != old && old < end && new < old + old_size || fixed && new == old {
+        return Ok(errno(22));
+    }
+    if new_size > old_size && !anonymous {
+        return Err(Error::UnsupportedSyscall(25));
+    }
+    let replaced = if new == old {
+        0
+    } else {
+        memory.mapped_in_range(new, new_size)
+    };
+    drop(memory);
+    let total = memory_usage(processes.values().chain(std::iter::once(process)));
+    if total
+        .checked_sub(old_size as usize)
+        .and_then(|size| size.checked_sub(replaced))
+        .and_then(|size| size.checked_add(new_size as usize))
+        .is_none_or(|size| size > config.max_memory)
+    {
+        return Ok(errno(12));
+    }
+    match process
+        .memory
+        .borrow_mut()
+        .remap(old, old_size, new, new_size)
+    {
+        Ok(()) => {
+            if new != old && !fixed {
+                process.heap.borrow_mut().next_map = end;
+            }
+            Ok(new)
+        }
+        Err(_) => Ok(errno(12)),
+    }
+}
+
 fn map_memory(
     config: &RuntimeConfig,
     process: &Process,
@@ -3385,7 +3472,14 @@ fn map_memory(
     let address = if fixed || exclusive {
         args[0]
     } else {
-        process.heap.borrow().next_map
+        let Some(address) = process
+            .memory
+            .borrow()
+            .find_free_range(process.heap.borrow().next_map, size)
+        else {
+            return Ok(errno(12));
+        };
+        address
     };
     if address
         .checked_add(size)
@@ -3444,7 +3538,11 @@ fn map_memory(
         write: args[2] & 2 != 0,
         execute: args[2] & 4 != 0,
     };
-    memory.map(address, size, permissions)?;
+    if anonymous {
+        memory.map_anonymous(address, size, permissions)?;
+    } else {
+        memory.map(address, size, permissions)?;
+    }
     if !anonymous {
         memory.initialize(address, &data)?;
         let backed = (data.len() as u64 + 4095) & !4095;

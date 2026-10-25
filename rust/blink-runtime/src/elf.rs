@@ -182,7 +182,7 @@ pub fn load(
     };
     const TOP: u64 = 0x0000_7fff_ffff_0000;
     const STACK: u64 = 1024 * 1024;
-    memory.map(TOP - STACK, STACK, Permissions::RW)?;
+    memory.map_anonymous(TOP - STACK, STACK, Permissions::RW)?;
     let mut sp = TOP;
     fn strings(memory: &mut Memory, sp: &mut u64, values: &[String]) -> Result<Vec<u64>> {
         let mut pointers = Vec::new();
