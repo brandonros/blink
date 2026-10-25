@@ -45,6 +45,7 @@ impl CancellationToken {
 #[derive(Clone)]
 pub struct Command {
     pub program: PathBuf,
+    pub cwd: PathBuf,
     pub args: Vec<String>,
     pub env: Vec<String>,
     pub timeout: Option<Duration>,
@@ -54,11 +55,16 @@ impl Command {
     pub fn new(program: impl Into<PathBuf>) -> Self {
         Self {
             program: program.into(),
+            cwd: PathBuf::from("/"),
             args: Vec::new(),
             env: Vec::new(),
             timeout: None,
             cancellation: CancellationToken::default(),
         }
+    }
+    pub fn cwd(mut self, path: impl Into<PathBuf>) -> Self {
+        self.cwd = path.into();
+        self
     }
     pub fn arg(mut self, arg: impl Into<String>) -> Self {
         self.args.push(arg.into());
@@ -133,6 +139,7 @@ impl Runtime {
         if !config.rootfs.is_dir()
             || config.max_memory < 2 * 1024 * 1024
             || config.max_image_size == 0
+            || config.max_image_size == usize::MAX
             || config.max_instructions == 0
         {
             return Err(Error::InvalidConfig("root or resource limits".into()));

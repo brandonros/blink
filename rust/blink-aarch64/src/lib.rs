@@ -6,6 +6,7 @@ pub struct Aarch64 {
     pub sp: u64,
     pub pc: u64,
     pub nzcv: u32,
+    pub tpidr: u64,
 }
 fn signed(v: u64, bits: u32) -> u64 {
     ((v << (64 - bits)) as i64 >> (64 - bits)) as u64
@@ -17,6 +18,7 @@ impl Aarch64 {
             sp: stack,
             pc: entry,
             nzcv: 0,
+            tpidr: 0,
         }
     }
     fn read(&self, r: usize, sp: bool) -> u64 {
@@ -76,6 +78,14 @@ impl Cpu for Aarch64 {
                 ],
             });
         }
+        if i & 0xffffffe0 == 0xd53bd040 {
+            self.write(rd, self.tpidr, true, false);
+            return Ok(Step::Continue);
+        }
+        if i & 0xffffffe0 == 0xd51bd040 {
+            self.tpidr = self.read(rd, false);
+            return Ok(Step::Continue);
+        }
         if i == 0xd503201f {
             return Ok(Step::Continue);
         }
@@ -93,7 +103,7 @@ impl Cpu for Aarch64 {
                 _ => unreachable!(),
             };
             self.write(rd, v, wide, false);
-        } else if i & 0x1f000000 == 0x11000000 {
+        } else if i & 0x1f800000 == 0x11000000 {
             let imm = (((i >> 10) & 4095) as u64) << if i & (1 << 22) != 0 { 12 } else { 0 };
             let sub = i & (1 << 30) != 0;
             let flags = i & (1 << 29) != 0;
@@ -166,5 +176,47 @@ impl Cpu for Aarch64 {
             return Err(Error::UnsupportedInstruction { pc, encoding: i });
         }
         Ok(Step::Continue)
+    }
+}
+
+#[cfg(test)]
+mod decoder_tests {
+    use super::*;
+    use blink_core::Permissions;
+    use yaxpeax_arch::{Decoder, U8Reader};
+    #[test]
+    fn accepted_encodings_agree_with_pinned_a64_decoder() {
+        let decoder = yaxpeax_arm::armv8::a64::InstDecoder::default();
+        let mut memory = Memory::new(4096);
+        memory.map(0x1000, 4096, Permissions::RX).unwrap();
+        let mut state = 0x12345678u32;
+        let mut accepted = 0;
+        for _ in 0..100_000 {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            let bytes = state.to_le_bytes();
+            memory.initialize(0x1000, &bytes).unwrap();
+            let mut cpu = Aarch64::new(0x1000, 0x1800);
+            if cpu.step(&mut memory).is_ok() {
+                accepted += 1;
+                assert!(
+                    decoder.decode(&mut U8Reader::new(&bytes)).is_ok(),
+                    "accepted invalid encoding {state:08x}"
+                );
+            }
+        }
+        assert!(accepted > 1000);
+    }
+    #[test]
+    fn tpidr_register_is_guest_state() {
+        let mut memory = Memory::new(4096);
+        memory.map(0x1000, 4096, Permissions::RX).unwrap();
+        memory
+            .initialize(0x1000, &[0x40, 0xd0, 0x1b, 0xd5, 0x41, 0xd0, 0x3b, 0xd5])
+            .unwrap();
+        let mut cpu = Aarch64::new(0x1000, 0);
+        cpu.regs[0] = 0x1234;
+        cpu.step(&mut memory).unwrap();
+        cpu.step(&mut memory).unwrap();
+        assert_eq!(cpu.regs[1], 0x1234);
     }
 }

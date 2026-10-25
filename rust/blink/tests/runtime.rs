@@ -283,3 +283,99 @@ fn arm_clone_and_wait_use_shared_scheduler() {
         .ensure_success()
         .unwrap();
 }
+
+#[test]
+fn blocked_futex_can_time_out() {
+    let code = [
+        0x48, 0x83, 0xec, 0x10, 0x48, 0xc7, 0x04, 0x24, 0, 0, 0, 0, 0x48, 0x89, 0xe7, 0x31, 0xf6,
+        0x31, 0xd2, 0x45, 0x31, 0xd2, 0xb8, 202, 0, 0, 0, 0x0f, 0x05,
+    ];
+    let r = Root::new();
+    r.write("futex", &elf(GuestArch::X86_64, &code));
+    let mut rt = r.runtime(GuestArch::X86_64);
+    assert_eq!(
+        rt.run(Command::new("futex").timeout(Duration::from_millis(3)))
+            .unwrap()
+            .termination,
+        Termination::TimedOut
+    );
+}
+
+#[test]
+fn sink_failure_drops_guest_state() {
+    struct Fail;
+    impl std::io::Write for Fail {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("sink failure"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let r = Root::new();
+    let mut code = arm(&[
+        0xd2800020, 0x100000e1, 0xd28000c2, 0xd2800808, 0xd4000001, 0xd2800000, 0xd2800ba8,
+        0xd4000001,
+    ]);
+    code.extend(b"hello\n");
+    r.write("hello", &elf(GuestArch::Aarch64, &code));
+    let mut rt = r.runtime(GuestArch::Aarch64);
+    assert!(matches!(
+        rt.run_with_io(Command::new("hello"), &mut Fail, &mut std::io::sink()),
+        Err(Error::Io(_))
+    ));
+    capture(&mut rt, "hello").0.ensure_success().unwrap();
+}
+
+fn file_guest(write: bool) -> Vec<u8> {
+    let mut code = vec![0xb8, 1, 1, 0, 0, 0xbf, 156, 255, 255, 255, 0x48, 0xbe];
+    code.extend(0x402000u64.to_le_bytes());
+    code.push(0xba);
+    code.extend((if write { 577u32 } else { 0 }).to_le_bytes());
+    code.extend([0x41, 0xba, 164, 1, 0, 0, 0x0f, 0x05, 0x89, 0xc7]);
+    if write {
+        code.extend([0x48, 0xbe]);
+        code.extend(0x402100u64.to_le_bytes());
+        code.extend([0xba, 6, 0, 0, 0, 0xb8, 1, 0, 0, 0, 0x0f, 0x05]);
+    } else {
+        code.extend([
+            0x48, 0x83, 0xec, 16, 0x48, 0x89, 0xe6, 0xba, 6, 0, 0, 0, 0x31, 0xc0, 0x0f, 0x05, 0xbf,
+            1, 0, 0, 0, 0xb8, 1, 0, 0, 0, 0x0f, 0x05,
+        ]);
+    }
+    code.extend(xexit(0));
+    code.resize(4096, 0);
+    code.extend(b"state\0");
+    code.resize(4096 + 256, 0);
+    code.extend(b"saved\n");
+    elf(GuestArch::X86_64, &code)
+}
+#[test]
+fn files_persist_but_cwd_resets_between_runs() {
+    let r = Root::new();
+    r.write("writer", &file_guest(true));
+    r.write("reader", &file_guest(false));
+    fs::create_dir(r.0.join("sub")).unwrap();
+    let mut rt = r.runtime(GuestArch::X86_64);
+    rt.run(Command::new("/writer").cwd("/sub"))
+        .unwrap()
+        .ensure_success()
+        .unwrap();
+    assert_eq!(fs::read(r.0.join("sub/state")).unwrap(), b"saved\n");
+    assert!(!r.0.join("state").exists());
+    let mut out = BoundedOutput::new(16);
+    rt.run_with_io(
+        Command::new("/reader").cwd("/sub"),
+        &mut out,
+        &mut std::io::sink(),
+    )
+    .unwrap()
+    .ensure_success()
+    .unwrap();
+    assert_eq!(out.as_bytes(), b"saved\n");
+    rt.run(Command::new("/writer"))
+        .unwrap()
+        .ensure_success()
+        .unwrap();
+    assert_eq!(fs::read(r.0.join("state")).unwrap(), b"saved\n");
+}

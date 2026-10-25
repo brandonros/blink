@@ -10,3 +10,7 @@ workspace = true
 
 [dependencies]
 blink-core = { path = "../blink-core" }
+
+[dev-dependencies]
+yaxpeax-arm = { version = "=0.5.0", default-features = false, features = ["std"] }
+yaxpeax-arch = { version = "=0.3.3", default-features = false, features = ["std"] }

@@ -11,6 +11,7 @@ pub enum Error {
     MemoryFault { address: u64, access: Access },
     UnsupportedInstruction { pc: u64, encoding: u32 },
     UnsupportedSyscall(u64),
+    ArithmeticFault,
     ResourceLimit,
     InvalidConfig(String),
     Closed,
