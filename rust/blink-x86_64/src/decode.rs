@@ -241,6 +241,23 @@ pub(super) fn operand(
         yaxpeax_x86::long_mode::Opcode::FXSAVE | yaxpeax_x86::long_mode::Opcode::FXRSTOR
     ) {
         512
+    } else if matches!(
+        i.opcode(),
+        yaxpeax_x86::long_mode::Opcode::FNSTENV
+            | yaxpeax_x86::long_mode::Opcode::FLDENV
+            | yaxpeax_x86::long_mode::Opcode::FNSAVE
+            | yaxpeax_x86::long_mode::Opcode::FRSTOR
+    ) {
+        let environment = if i.prefixes.operand_size() { 14 } else { 28 };
+        environment
+            + if matches!(
+                i.opcode(),
+                yaxpeax_x86::long_mode::Opcode::FNSAVE | yaxpeax_x86::long_mode::Opcode::FRSTOR
+            ) {
+                80
+            } else {
+                0
+            }
     } else if i.opcode() == yaxpeax_x86::long_mode::Opcode::CLFLUSH {
         1
     } else if lea {
@@ -248,7 +265,7 @@ pub(super) fn operand(
     } else {
         i.mem_size().and_then(|s| s.bytes_size()).ok_or_else(bad)? as usize
     };
-    if !matches!(width, 1 | 2 | 4 | 8 | 10 | 16 | 512) {
+    if !matches!(width, 1 | 2 | 4 | 8 | 10 | 14 | 16 | 28 | 94 | 108 | 512) {
         return Err(bad());
     }
     Ok(Value::Memory {

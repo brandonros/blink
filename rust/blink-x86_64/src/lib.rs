@@ -253,7 +253,7 @@ impl Cpu for X86 {
             return Err(Error::ArithmeticFault);
         }
         if op == Op::EMMS {
-            self.fpu.occupied = [false; 8];
+            self.fpu.tags = [3; 8];
             self.rip = next;
             return Ok(Step::Continue);
         }
@@ -294,7 +294,7 @@ impl Cpu for X86 {
             || self.packed(m, op, a, b, c, pc)?
         {
             if mmx {
-                self.fpu.occupied = [true; 8];
+                self.fpu.tags = [0; 8];
                 self.fpu.top = 0;
             }
             return Ok(Step::Continue);
@@ -1220,7 +1220,7 @@ impl Cpu for X86 {
             _ => return Err(bad()),
         }
         if mmx {
-            self.fpu.occupied = [true; 8];
+            self.fpu.tags = [0; 8];
             self.fpu.top = 0;
         }
         Ok(Step::Continue)
@@ -1450,7 +1450,7 @@ mod sse_memory_tests {
             memory.store(12280, 0x400000003f800000, 8).unwrap();
             cpu.step(&mut memory).unwrap();
             assert_eq!(cpu.fpu.values[0], (0xffffu128 << 64) | 0x200000001);
-            assert_eq!(cpu.fpu.occupied, [true; 8]);
+            assert_eq!(cpu.fpu.tags, [0; 8]);
             assert_eq!(cpu.fpu.top, 0);
         }
         let (mut cpu, mut memory) = run(&[0x0f, 0x6f, 0x00], 12284);
@@ -1460,12 +1460,12 @@ mod sse_memory_tests {
             Err(Error::MemoryFault { .. })
         ));
         assert_eq!(cpu.fpu.top, 3);
-        assert_eq!(cpu.fpu.occupied, [false; 8]);
+        assert_eq!(cpu.fpu.tags, [3; 8]);
         let (mut cpu, mut memory) = run(&[0x0f, 0x6f, 0x00], 8192);
         cpu.fpu.control &= !4;
         cpu.fpu.status |= 4;
         assert!(matches!(cpu.step(&mut memory), Err(Error::ArithmeticFault)));
-        assert_eq!(cpu.fpu.occupied, [false; 8]);
+        assert_eq!(cpu.fpu.tags, [3; 8]);
     }
     #[test]
     fn masked_store_checks_selected_bytes_and_segment_address() {

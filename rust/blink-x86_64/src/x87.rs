@@ -141,10 +141,21 @@ fn square_root(bits: u128, control: u16) -> (u128, u16, bool) {
     (rounded | ((output_exp as u128) << 64), exceptions, up)
 }
 const INDEFINITE: u128 = 0xffff_c000_0000_0000_0000;
-#[derive(Clone)]
+fn value_tag(bits: u128) -> u8 {
+    let exponent = (bits >> 64) & 0x7fff;
+    let fraction = bits as u64;
+    if exponent == 0 && fraction == 0 {
+        1
+    } else if exponent == 0 || exponent == 0x7fff || fraction & (1 << 63) == 0 {
+        2
+    } else {
+        0
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Fpu {
     pub values: [u128; 8],
-    pub occupied: [bool; 8],
+    pub tags: [u8; 8],
     pub top: usize,
     pub control: u16,
     pub status: u16,
@@ -156,7 +167,7 @@ impl Default for Fpu {
     fn default() -> Self {
         Self {
             values: [0; 8],
-            occupied: [false; 8],
+            tags: [3; 8],
             top: 0,
             control: 0x37f,
             status: 0,
@@ -196,7 +207,7 @@ impl Fpu {
     }
     fn get(&self, index: usize, exceptions: &mut u16) -> u128 {
         let slot = (self.top + index) & 7;
-        if self.occupied[slot] {
+        if self.tags[slot] != 3 {
             self.values[slot]
         } else {
             *exceptions |= 0x41;
@@ -206,12 +217,12 @@ impl Fpu {
     fn set(&mut self, index: usize, bits: u128) {
         let slot = (self.top + index) & 7;
         self.values[slot] = bits;
-        self.occupied[slot] = true;
+        self.tags[slot] = value_tag(bits);
     }
     fn push(&mut self, mut value: u128, mut exceptions: u16) {
         self.status &= !0x200;
         let next = self.top.wrapping_sub(1) & 7;
-        if self.occupied[next] {
+        if self.tags[next] != 3 {
             exceptions |= 0x41;
             self.status |= 0x200;
             value = INDEFINITE;
@@ -222,7 +233,7 @@ impl Fpu {
         }
     }
     fn pop(&mut self) {
-        self.occupied[self.top] = false;
+        self.tags[self.top] = 3;
         self.top = (self.top + 1) & 7;
     }
 }
@@ -316,6 +327,10 @@ impl X86 {
                 | Op::FNINIT
                 | Op::FNCLEX
                 | Op::FNSTCW
+                | Op::FNSTENV
+                | Op::FLDENV
+                | Op::FNSAVE
+                | Op::FRSTOR
                 | Op::FNSTSW
                 | Op::FLDCW
                 | Op::WAIT
@@ -376,14 +391,25 @@ impl X86 {
         ) {
             return Ok(false);
         }
-        if !matches!(op, Op::FNINIT | Op::FNCLEX | Op::FNSTCW | Op::FNSTSW)
-            && self.fpu.status & !self.fpu.control & 63 != 0
+        if !matches!(
+            op,
+            Op::FNINIT | Op::FNCLEX | Op::FNSTCW | Op::FNSTSW | Op::FNSTENV | Op::FNSAVE
+        ) && self.fpu.status & !self.fpu.control & 63 != 0
         {
             return Err(Error::ArithmeticFault);
         }
         if !matches!(
             op,
-            Op::FNINIT | Op::FNCLEX | Op::FNSTCW | Op::FNSTSW | Op::FLDCW | Op::WAIT
+            Op::FNINIT
+                | Op::FNCLEX
+                | Op::FNSTCW
+                | Op::FNSTSW
+                | Op::FLDCW
+                | Op::WAIT
+                | Op::FNSTENV
+                | Op::FLDENV
+                | Op::FNSAVE
+                | Op::FRSTOR
         ) {
             self.fpu.instruction = pc;
             for offset in 0..14 {
@@ -401,7 +427,59 @@ impl X86 {
             }
         }
         match op {
-            Op::FNINIT => self.fpu = Fpu::default(),
+            Op::FNSTENV | Op::FLDENV | Op::FNSAVE | Op::FRSTOR => {
+                let Value::Memory { address, width } = a.ok_or_else(bad)? else {
+                    return Err(bad());
+                };
+                let full = matches!(op, Op::FNSAVE | Op::FRSTOR);
+                let environment = width - if full { 80 } else { 0 };
+                if !matches!(environment, 14 | 28) {
+                    return Err(bad());
+                }
+                let mut bytes = vec![0; width];
+                if matches!(op, Op::FNSTENV | Op::FNSAVE) {
+                    self.fpu.save_environment(&mut bytes[..environment]);
+                    if full {
+                        for n in 0..8 {
+                            bytes[environment + n * 10..environment + (n + 1) * 10]
+                                .copy_from_slice(
+                                    &self.fpu.values[(self.fpu.top + n) & 7].to_le_bytes()[..10],
+                                );
+                        }
+                    }
+                    memory.write(address, &bytes)?;
+                    if full {
+                        self.fpu = Fpu {
+                            values: self.fpu.values,
+                            ..Fpu::default()
+                        };
+                    } else {
+                        self.fpu.control |= 63;
+                    }
+                } else {
+                    memory.read(address, &mut bytes, blink_core::Access::Read)?;
+                    self.fpu.load_environment(&bytes[..environment]);
+                    if full {
+                        for n in 0..8 {
+                            let mut value = [0; 16];
+                            value[..10].copy_from_slice(
+                                &bytes[environment + n * 10..environment + (n + 1) * 10],
+                            );
+                            self.fpu.values[(self.fpu.top + n) & 7] = u128::from_le_bytes(value);
+                            let slot = (self.fpu.top + n) & 7;
+                            if self.fpu.tags[slot] != 3 {
+                                self.fpu.tags[slot] = value_tag(self.fpu.values[slot]);
+                            }
+                        }
+                    }
+                }
+            }
+            Op::FNINIT => {
+                self.fpu = Fpu {
+                    values: self.fpu.values,
+                    ..Fpu::default()
+                }
+            }
             Op::FNCLEX => self.fpu.status &= !0x80ff,
             Op::FNSTCW => self.write(memory, a.ok_or_else(bad)?, self.fpu.control as u64)?,
             Op::FNSTSW => self.write(memory, a.ok_or_else(bad)?, self.fpu.status() as u64)?,
@@ -438,7 +516,7 @@ impl X86 {
                 let bits = self.fpu.values[self.fpu.top];
                 let fraction = bits as u64;
                 let exponent = (bits >> 64) & 0x7fff;
-                let class = if !self.fpu.occupied[self.fpu.top] {
+                let class = if self.fpu.tags[self.fpu.top] == 3 {
                     5
                 } else if exponent == 0 {
                     if fraction == 0 {
@@ -689,7 +767,7 @@ impl X86 {
                 let Value::FloatStack(n) = a.ok_or_else(bad)? else {
                     return Err(bad());
                 };
-                self.fpu.occupied[(self.fpu.top + n) & 7] = false;
+                self.fpu.tags[(self.fpu.top + n) & 7] = 3;
                 if op == Op::FFREEP {
                     self.fpu.pop();
                 }
@@ -817,6 +895,58 @@ impl X86 {
 }
 
 impl Fpu {
+    fn save_environment(&self, bytes: &mut [u8]) {
+        let tags = self
+            .tags
+            .iter()
+            .enumerate()
+            .fold(0u16, |word, (n, tag)| word | ((*tag as u16) << (n * 2)));
+        let short = bytes.len() == 14;
+        let stride = if short { 2 } else { 4 };
+        bytes.fill(if short { 0 } else { 0xff });
+        for (n, value) in [self.control, self.status(), tags].iter().enumerate() {
+            bytes[n * stride..n * stride + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        if short {
+            bytes[6..8].copy_from_slice(&(self.instruction as u16).to_le_bytes());
+            bytes[8..10].fill(0);
+            bytes[10..12].copy_from_slice(&(self.data as u16).to_le_bytes());
+            bytes[12..14].fill(0);
+        } else {
+            bytes[12..16].copy_from_slice(&(self.instruction as u32).to_le_bytes());
+            bytes[16..18].fill(0);
+            bytes[18..20].copy_from_slice(&self.opcode.to_le_bytes());
+            bytes[20..24].copy_from_slice(&(self.data as u32).to_le_bytes());
+            bytes[24..26].fill(0);
+        }
+    }
+    fn load_environment(&mut self, bytes: &[u8]) {
+        let word = |offset| u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap());
+        let short = bytes.len() == 14;
+        let stride = if short { 2 } else { 4 };
+        self.control = word(0);
+        self.status = word(stride);
+        self.top = ((self.status >> 11) & 7) as usize;
+        let tags = word(stride * 2);
+        for n in 0..8 {
+            self.tags[n] = if (tags >> (n * 2)) & 3 == 3 {
+                3
+            } else {
+                value_tag(self.values[n])
+            };
+        }
+        if short {
+            self.instruction = word(6) as u64;
+            self.data = word(10) as u64;
+        } else {
+            self.instruction = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as u64;
+            self.opcode = word(18) & 0x7ff;
+            self.data = u32::from_le_bytes(bytes[20..24].try_into().unwrap()) as u64;
+        }
+        // Loaded exception masks determine whether the next waiting instruction traps.
+        self.status &= !0x8080;
+        self.exception(0);
+    }
     pub fn save_legacy(&self, bytes: &mut [u8]) {
         bytes[..2].copy_from_slice(&self.control.to_le_bytes());
         bytes[2..4].copy_from_slice(&self.status().to_le_bytes());
@@ -824,10 +954,10 @@ impl Fpu {
         bytes[8..16].copy_from_slice(&self.instruction.to_le_bytes());
         bytes[16..24].copy_from_slice(&self.data.to_le_bytes());
         bytes[4] = self
-            .occupied
+            .tags
             .iter()
             .enumerate()
-            .fold(0, |bits, (n, used)| bits | (u8::from(*used) << n));
+            .fold(0, |bits, (n, used)| bits | (u8::from(*used != 3) << n));
         for n in 0..8 {
             bytes[32 + n * 16..42 + n * 16]
                 .copy_from_slice(&self.values[(self.top + n) & 7].to_le_bytes()[..10]);
@@ -847,10 +977,15 @@ impl Fpu {
             ..Self::default()
         };
         for n in 0..8 {
-            state.occupied[n] = bytes[4] & (1 << n) != 0;
             let mut value = [0; 16];
             value[..10].copy_from_slice(&bytes[32 + n * 16..42 + n * 16]);
             state.values[(top + n) & 7] = u128::from_le_bytes(value);
+            let slot = (top + n) & 7;
+            state.tags[slot] = if bytes[4] & (1 << slot) != 0 {
+                value_tag(state.values[slot])
+            } else {
+                3
+            };
         }
         state
     }
@@ -921,6 +1056,44 @@ mod tests {
             .unwrap();
         memory.initialize(0x1000, code).unwrap();
         (X86::new(0x1000, 0x3000), memory)
+    }
+    #[test]
+    fn legacy_environment_faults_leave_state_and_destination_unchanged() {
+        for (op, size) in [
+            (Op::FNSTENV, 14),
+            (Op::FNSTENV, 28),
+            (Op::FNSAVE, 94),
+            (Op::FNSAVE, 108),
+            (Op::FLDENV, 14),
+            (Op::FLDENV, 28),
+            (Op::FRSTOR, 94),
+            (Op::FRSTOR, 108),
+        ] {
+            let (mut cpu, mut memory) = machine(&[0xd9, 0xe8]);
+            cpu.fpu.control = 0xb7f;
+            cpu.fpu.push(Extended::from_u128(42).value.to_bits(), 0);
+            cpu.fpu.instruction = 0x123456;
+            let before = cpu.fpu.clone();
+            memory.write(0x2ff0, &[0xa5; 16]).unwrap();
+            assert!(cpu
+                .x87(
+                    &mut memory,
+                    op,
+                    Some(Value::Memory {
+                        address: 0x2fff,
+                        width: size
+                    }),
+                    None,
+                    0x1000
+                )
+                .is_err());
+            assert_eq!(cpu.fpu, before);
+            let mut bytes = [0; 16];
+            memory
+                .read(0x2ff0, &mut bytes, blink_core::Access::Read)
+                .unwrap();
+            assert_eq!(bytes, [0xa5; 16]);
+        }
     }
     #[test]
     fn square_root_empty_stack_and_unmasked_invalid_preserve_state() {
@@ -1007,13 +1180,13 @@ mod tests {
         cpu.enter_signal(&mut memory, 10, 0x1010, 0x1020, 0, 1)
             .unwrap();
         assert_eq!(cpu.fpu.control, 0x37f);
-        assert_eq!(cpu.fpu.occupied, [false; 8]);
+        assert_eq!(cpu.fpu.tags, [3; 8]);
         cpu.fpu.push(Extended::from_u128(999).value.to_bits(), 0);
         cpu.regs[4] += 8;
         cpu.restore_signal(&memory).unwrap();
         assert_eq!(cpu.fpu.control, saved.control);
         assert_eq!(cpu.fpu.status(), saved.status());
         assert_eq!(cpu.fpu.values, saved.values);
-        assert_eq!(cpu.fpu.occupied, saved.occupied);
+        assert_eq!(cpu.fpu.tags, saved.tags);
     }
 }

@@ -173,7 +173,7 @@ The preexisting C executable, config, clean-build log and hash manifest are in
 `o/rust-reference` directory. On this Linux x86_64 host, Rust, C interpreter and
 native Linux comparisons retain per-fixture results. The expanded filesystem,
 MXCSR restart, socketpair and alternate-stack cases expose additional C baseline
-differences; consult the report rather than treating the C runtime as the oracle. All 24 fixtures pass Rust/native. C differs on vfork memory sharing and
+differences; consult the report rather than treating the C runtime as the oracle. All 25 fixtures pass Rust/native. C differs on vfork memory sharing and
 returns extra F_GETFL flags on a CLOEXEC pipe in the descriptor fixture. C JIT fails the pipe/fork
 fixture and crashes during the exec fixture, including after a clean rebuild.
 Those failures remain visible; C is a comparison target, not an infallible oracle.
@@ -259,7 +259,7 @@ children, and remain through exec. Threads share their process timer; pending
 standard signals coalesce. Wall/monotonic clock queries use host clock adapters.
 Nanosleep and absolute/relative clock_nanosleep cooperate with scheduling and
 write remaining time on interruption. Virtual/profiling CPU timers and other
-clock IDs remain unsupported. The native comparison suite now has 24 compiled
+clock IDs remain unsupported. The native comparison suite now has 25 compiled
 fixtures, including real-timer delivery, fork inheritance, and interrupted sleep.
 
 Packed conversion memory operands are checked at their architectural width: CVTDQ2PD and CVTPS2PD read eight bytes, even though the decoder reports a 16-byte vector width. Page-boundary and unmasked-exception tests guard source accesses and whole-destination preservation.
@@ -297,8 +297,7 @@ overflow, deferred faults, and signal-frame preservation. The adapter handles
 x87 NaN priority and the APFloat directed-overflow flag difference. CI replays
 this native-generated fixture on Apple Silicon as well as the SSE fixture.
 
-This is partial x87 support. Transcendentals,
-legacy environment/save-state instructions and complete
+This is partial x87 support. Transcendentals, remaining arithmetic operations and complete
 unsupported-encoding behavior remain; unsupported operations fail explicitly.
 The complete x87 FPU feature remains unadvertised. No Node/Bun workload or
 new agent-platform checkpoint is established by these instruction tests.
@@ -490,3 +489,10 @@ precision-control truncation. FXAM classifies empty, zero, normal, denormal,
 infinite, NaN and unsupported encodings without arithmetic exceptions. Native
 comparisons cover all constant rounding/precision combinations and classification
 of occupied and empty slots.
+
+Legacy FNSTENV/FLDENV and FNSAVE/FRSTOR support the 14/28-byte environment
+and 94/108-byte full images, operand-size overrides, physical register tags,
+logical stack ordering and exception masks. Save/reset and load round trips match
+native Linux for both formats; CI replays that fixture on Apple Silicon.
+Cross-page failures preserve the entire FPU state and destination bytes.
+FNINIT and FNSAVE reset control/tag state while preserving register contents.

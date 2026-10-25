@@ -53,7 +53,7 @@ jobs:
           python3 rust/apk-smoke.py --root target/amd64-alpine
       - name: Pull pinned AMD64 Node fixture using linux-oci-builder
         run: cargo run --release --locked --manifest-path work/builder/Cargo.toml -- docker.io/library/node@sha256:025b8e975a61d94e33abeafaad1255ef44e4898cf1a1b6446860009c72e6d284 --platform linux/amd64 --output target/node-oci
-      - name: Run musl Node version gate
+      - name: Run musl Node JavaScript and filesystem gates
         run: |
           python3 rust/node-fixture.py --layout target/node-oci --root target/amd64-node
           python3 rust/node-smoke.py --root target/amd64-node
@@ -75,6 +75,7 @@ jobs:
             target/original-asm/results.json
             target/differential/results.json
             target/differential/atomic-x86_64
+            target/differential/fpenv-x86_64
             target/tcp-smoke/results.json
             target/float-regressions/float-x86_64
             target/float-regressions/native.bin
@@ -111,3 +112,4 @@ jobs:
           done
           python3 rust/approx-regressions.py --replay target/oracle/approx-regressions
           cargo run --release --locked -p blink-cli -- target/oracle/differential/atomic-x86_64
+          cargo run --release --locked -p blink-cli -- target/oracle/differential/fpenv-x86_64
