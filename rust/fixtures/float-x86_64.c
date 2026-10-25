@@ -15,16 +15,17 @@ struct record { unsigned long a,b,result; unsigned control,status,operation,widt
 #define CONVERT(instruction) __asm__ volatile(SETUP instruction " %%xmm0,%%xmm1; movq %%xmm1,%0; stmxcsr %1" ARGS)
 #define FROMINT(instruction) __asm__ volatile(SETUP instruction " %2,%%xmm1; movq %%xmm1,%0; stmxcsr %1" ARGS)
 #define PREDICATE(instruction,predicate) __asm__ volatile(SETUP instruction " $" #predicate ",%%xmm1,%%xmm0; movq %%xmm0,%0; stmxcsr %1" ARGS)
-#define PACKED(instruction) __asm__ volatile("ldmxcsr %3; movdqu %2,%%xmm0; " instruction " %%xmm0,%%xmm1; movdqu %%xmm1,%0; stmxcsr %1" :"=m"(output),"=m"(status):"m"(input),"m"(control):"xmm0","xmm1","memory")
+#define PACKED(instruction) __asm__ volatile("ldmxcsr %3; movdqu %2,%%xmm0; movdqu %4,%%xmm1; " instruction " %%xmm0,%%xmm1; movdqu %%xmm1,%0; stmxcsr %1" :"=m"(output),"=m"(status):"m"(input),"m"(control),"m"(other):"xmm0","xmm1","memory")
 #define FROMMM(instruction) __asm__ volatile("fninit; ldmxcsr %3; movq %2,%%mm0; movdqu %2,%%xmm1; " instruction " %%mm0,%%xmm1; movdqu %%xmm1,%0; stmxcsr %1; emms" :"=m"(output),"=m"(status):"m"(input),"m"(control):"xmm1","mm0","memory")
 #define TOMM(instruction) do {output[0]=output[1]=0; __asm__ volatile("fninit; ldmxcsr %3; movdqu %2,%%xmm0; " instruction " %%xmm0,%%mm1; movq %%mm1,%0; stmxcsr %1; emms" :"=m"(output[0]),"=m"(status):"m"(input),"m"(control):"xmm0","mm1","memory");} while(0)
+#define PACKCOMPARE(instruction,predicate) __asm__ volatile("ldmxcsr %3; movdqu %2,%%xmm0; movdqu %4,%%xmm1; " instruction " $" #predicate ",%%xmm0,%%xmm1; movdqu %%xmm1,%0; stmxcsr %1" :"=m"(output),"=m"(status):"m"(input),"m"(control),"m"(other):"xmm0","xmm1","memory")
 static void packed(void) {
-    for(unsigned op=0;op<14;op++) for(unsigned mode=0;mode<16;mode++)
+    for(unsigned op=0;op<46;op++) for(unsigned mode=0;mode<16;mode++)
     for(unsigned pair=0;pair<169+256;pair++) {
-        unsigned long input[2],output[2]; unsigned status;
+        unsigned long input[2],output[2],other[2]; unsigned status;
         unsigned control=0x1f80|((mode&3)<<13)|((mode&4)?64:0)|((mode&8)?32768:0);
         if(pair<169) {
-            if(op==1||op==2||op==6||op==10||op==11) {
+            if(op==1||op==2||op==6||op==10||op==11||(op>=14&&op<30&&op%2==0)||(op>=30&&op<38)) {
                 input[0]=singles[pair/13]|(singles[pair%13]<<32);
                 input[1]=singles[(pair+3)%13]|(singles[(pair+7)%13]<<32);
             } else {input[0]=doubles[pair/13];input[1]=doubles[pair%13];}
@@ -33,6 +34,7 @@ static void packed(void) {
             seed ^= seed>>12; seed ^= seed<<25; seed ^= seed>>27; input[0]=seed*0x2545f4914f6cdd1dul;
             seed ^= seed>>12; seed ^= seed<<25; seed ^= seed>>27; input[1]=seed*0x2545f4914f6cdd1dul;
         }
+        other[0]=input[1];other[1]=input[0];
         switch(op) {
         case 0:PACKED("cvtdq2ps");break;
         case 1:PACKED("cvtps2dq");break;
@@ -45,6 +47,39 @@ static void packed(void) {
         case 8:FROMMM("cvtpi2ps");break;case 9:FROMMM("cvtpi2pd");break;
         case 10:TOMM("cvtps2pi");break;case 11:TOMM("cvttps2pi");break;
         case 12:TOMM("cvtpd2pi");break;case 13:TOMM("cvttpd2pi");break;
+        case 14:PACKED("addps");break;
+        case 15:PACKED("addpd");break;
+        case 16:PACKED("subps");break;
+        case 17:PACKED("subpd");break;
+        case 18:PACKED("mulps");break;
+        case 19:PACKED("mulpd");break;
+        case 20:PACKED("divps");break;
+        case 21:PACKED("divpd");break;
+        case 22:PACKED("minps");break;
+        case 23:PACKED("minpd");break;
+        case 24:PACKED("maxps");break;
+        case 25:PACKED("maxpd");break;
+        case 26:PACKED("sqrtps");break;
+        case 27:PACKED("sqrtpd");break;
+        case 28:PACKED("andps");break;
+        case 29:PACKED("andpd");break;
+        case 30:PACKCOMPARE("cmpps",0);break;
+        case 31:PACKCOMPARE("cmpps",1);break;
+        case 32:PACKCOMPARE("cmpps",2);break;
+        case 33:PACKCOMPARE("cmpps",3);break;
+        case 34:PACKCOMPARE("cmpps",4);break;
+        case 35:PACKCOMPARE("cmpps",5);break;
+        case 36:PACKCOMPARE("cmpps",6);break;
+        case 37:PACKCOMPARE("cmpps",7);break;
+        case 38:PACKCOMPARE("cmppd",0);break;
+        case 39:PACKCOMPARE("cmppd",1);break;
+        case 40:PACKCOMPARE("cmppd",2);break;
+        case 41:PACKCOMPARE("cmppd",3);break;
+        case 42:PACKCOMPARE("cmppd",4);break;
+        case 43:PACKCOMPARE("cmppd",5);break;
+        case 44:PACKCOMPARE("cmppd",6);break;
+        case 45:PACKCOMPARE("cmppd",7);break;
+
         }
         for(unsigned half=0;half<2;half++) {
             struct record r={input[0],input[1],output[half],control,status,24+op,16+half};

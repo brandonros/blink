@@ -35,14 +35,16 @@ __attribute__((noreturn,force_align_arg_pointer)) void _start(void) {
     CHECK(second[4]==0 && (get(second+2,2)&0x3800)==0);
     __asm__ volatile("fld1; fxsave64 %0":"=m"(second)::"st","memory");
     CHECK(second[4]==0x80 && (get(second+2,2)&0x3800)==0x3800 && get(second+40,2)==0x3fff);
-    for(int invalid=0;invalid<2;invalid++) {
+    for(int invalid=0;invalid<3;invalid++) {
         long child=call(57,0,0,0,0);CHECK(child>=0);
         if(child==0) {
             if(invalid==0) {unsigned char *p=first+1;__asm__ volatile("fxsave64 (%0)"::"r"(p):"memory");}
+            else if(invalid==2) {unsigned char *p=first+1;__asm__ volatile("movntq %%mm0,(%0)"::"r"(p):"memory");}
             else {first[27]|=0x80;__asm__ volatile("fxrstor64 %0"::"m"(first):"memory");}
             call(231,99,0,0,0);__builtin_unreachable();
         }
-        int status;CHECK(call(61,child,(long)&status,0,0)==child && (status&127)==11);
+        int status;CHECK(call(61,child,(long)&status,0,0)==child);
+        CHECK(invalid==2 ? status==(99<<8) : (status&127)==11);
     }
     call(231,0,0,0,0);__builtin_unreachable();
 }

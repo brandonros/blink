@@ -35,6 +35,7 @@ jobs:
           python3 rust/float-regressions.py
           python3 rust/x87-regressions.py
           python3 rust/packed-regressions.py
+          python3 rust/approx-regressions.py
           python3 rust/tcp-smoke.py
       - uses: actions/checkout@v4
         with:
@@ -82,6 +83,9 @@ jobs:
             target/packed-regressions/packed-x86_64
             target/packed-regressions/native.bin
             target/packed-regressions/results.json
+            target/approx-regressions/approx-x86_64
+            target/approx-regressions/native.bin
+            target/approx-regressions/results.json
 
   replay-amd64-on-apple-silicon:
     needs: runtime
@@ -100,3 +104,4 @@ jobs:
             cargo run --release --locked -p blink-cli -- target/oracle/$suite-regressions/$suite-x86_64 > target/oracle/$suite-actual.bin
             cmp target/oracle/$suite-regressions/native.bin target/oracle/$suite-actual.bin
           done
+          python3 rust/approx-regressions.py --replay target/oracle/approx-regressions

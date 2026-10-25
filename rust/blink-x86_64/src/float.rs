@@ -65,6 +65,39 @@ fn integer_sqrt(mut value: u128) -> (u128, u128) {
     }
     (root, value)
 }
+// RCP/RSQRT permit implementation-dependent approximations. Software arithmetic
+// gives a tighter error bound than required; their special values and unchanged
+// MXCSR are architectural, and are independent of rounding/DAZ/FTZ controls.
+fn reciprocal(bits: u32, root: bool) -> u32 {
+    let sign = bits & 0x80000000;
+    let magnitude = bits & 0x7fffffff;
+    if magnitude > 0x7f800000 {
+        return bits | 0x400000;
+    }
+    if magnitude < 0x800000 {
+        return sign | 0x7f800000;
+    }
+    if root && sign != 0 {
+        return 0xffc00000;
+    }
+    if magnitude == 0x7f800000 {
+        return sign;
+    }
+    let operand = if root {
+        square_root::<Single>(bits as u64, 0x1f80, &mut 0) as u32
+    } else {
+        bits
+    };
+    let value = Single::from_u128(1)
+        .value
+        .div_r(Single::from_bits(operand as u128), Round::NearestTiesToEven)
+        .value;
+    if value.is_denormal() {
+        sign
+    } else {
+        value.to_bits() as u32
+    }
+}
 fn square_root<F: Float>(bits: u64, mxcsr: u32, flags: &mut u32) -> u64 {
     let mut inputs = 0;
     let value = input::<F>(bits, mxcsr, &mut inputs);
@@ -302,6 +335,23 @@ impl X86 {
                 self.mxcsr = value;
             }
             Op::STMXCSR => self.write(m, a.ok_or_else(bad)?, self.mxcsr as u64)?,
+            Op::RCPSS | Op::RCPPS | Op::RSQRTSS | Op::RSQRTPS => {
+                let dst = a.ok_or_else(bad)?;
+                let source = self.vector(m, b.ok_or_else(bad)?)?;
+                let mut out = self.vector(m, dst)?;
+                let count = if matches!(op, Op::RCPSS | Op::RSQRTSS) {
+                    1
+                } else {
+                    4
+                };
+                for lane in 0..count {
+                    let bits =
+                        u32::from_le_bytes(source[lane * 4..lane * 4 + 4].try_into().unwrap());
+                    let result = reciprocal(bits, matches!(op, Op::RSQRTSS | Op::RSQRTPS));
+                    out[lane * 4..lane * 4 + 4].copy_from_slice(&result.to_le_bytes());
+                }
+                self.write_vector(m, dst, out)?;
+            }
             Op::SQRTSS | Op::SQRTSD | Op::SQRTPS | Op::SQRTPD => {
                 let dst = a.ok_or_else(bad)?;
                 let src = self.vector(m, b.ok_or_else(bad)?)?;

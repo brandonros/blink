@@ -142,5 +142,17 @@ __attribute__((noreturn,force_align_arg_pointer)) void _start(void) {
         r.flags&=0x8d5;
         if(call(1,1,(long)&r,sizeof r)!=sizeof r){call(231,1,0,0);__builtin_unreachable();}
     }
+    for(unsigned op=0;op<2;op++) for(unsigned pair=0;pair<512;pair++) {
+        struct record r={0};r.op=200+op;r.variant=pair;
+        r.a[0]=0x0123456789abcdeful;r.a[1]=~r.a[0];
+        r.b[0]=(pair%8==0)?0:(pair%8==1)?~0ul:pair*0x9e3779b97f4a7c15ul;
+        r.b[1]=~r.b[0];
+        if(op==0) __asm__ volatile(SETUP "maskmovdqu %%xmm1,%%xmm0; sfence; pushfq; popq %1"
+            :"=m"(r.result),"=r"(r.flags):"m"(r.a),"m"(r.b),"D"(r.result):"xmm0","xmm1","cc","memory");
+        else __asm__ volatile(MMSETUP "maskmovq %%mm1,%%mm0; sfence; emms; pushfq; popq %1"
+            :"=m"(r.result),"=r"(r.flags):"m"(r.a),"m"(r.b),"D"(r.result):"mm0","mm1","cc","memory");
+        r.flags&=0x8d5;
+        if(call(1,1,(long)&r,sizeof r)!=sizeof r){call(231,1,0,0);__builtin_unreachable();}
+    }
     call(231,0,0,0);__builtin_unreachable();
 }

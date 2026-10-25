@@ -213,7 +213,7 @@ MXCSR and handlers start with the default control word. Synchronous fault
 handlers remain unsupported; an unmasked SIMD fault terminates the guest.
 
 `python3 rust/float-regressions.py` compares result bits and MXCSR against native
-Linux AMD64 for 516,800 scalar and packed records, covering exceptional values, four rounding
+Linux AMD64 for 952,000 scalar and packed records, covering exceptional values, four rounding
 modes, DAZ/FTZ combinations, and deterministic random inputs. Unit tests cover
 packed exceptions and page-end scalar reads. The adapter accounts for x86 NaN
 priority and directed-overflow flags: APFloat's saturation-to-maximum path reports
@@ -269,7 +269,7 @@ and SS_AUTODISARM. The guest ucontext saves/restores the stack configuration;
 fork inherits it, thread clone disables it, and exec resets its address/size.
 The native comparison checks stack placement, mutation rejection while active,
 autodisarm/restoration and fork/exec inheritance. No host signal stack changes.
-The current Alpine workload and 516,800-record floating-point gates passed on
+The current Alpine workload and 952,000-record floating-point gates passed on
 both Linux AMD64 and Darwin arm64 at commit 8cde89c.
 
 Guest SIGCHLD now reports child PID, UID, CLD_EXITED/CLD_KILLED and exit status.
@@ -328,7 +328,7 @@ CPUID deliberately does not yet advertise that incomplete feature group. CLI `--
 expose existing runtime limits for this 130 MB executable.
 
 Startup exercises word/dword packed shifts, saturating packing, lane shuffles,
-and packed logical operations. `packed-regressions.py` compares 56,320 complete
+and packed logical operations. `packed-regressions.py` compares 57,344 complete
 native register/flag records; CI also replays them on Apple Silicon. Guest capget
 supports version negotiation and guest PID queries. Its read-only model derives
 effective/permitted capabilities from guest root IDs; it never exposes host
@@ -371,7 +371,7 @@ passed on Linux AMD64 and Darwin arm64 CI; JavaScript execution remains unproven
 Packed SIMD coverage includes multiply-high/low, unsigned dword multiplication,
 signed multiply-add with wrapping overflow, byte absolute-difference sums,
 rounded averages, saturated addition/subtraction, word min/max, lane insertion
-and extraction, sign-bit masks, unpacking and non-temporal stores. The 56,320
+and extraction, sign-bit masks, unpacking and non-temporal stores. The 57,344
 native records compare full result registers and preserved flags. Memory tests
 cover aligned-only operand faults and a two-byte PINSRW at a page boundary.
 This still does not establish full SSE2/MMX coverage or enable their CPUID bits.
@@ -384,3 +384,20 @@ check tag/TOP transitions and the 80-bit register aliases. The packed suite now
 includes 62 MMX cases; six MMX/float conversions extend the floating-point suite.
 Page-end conversion and fault tests check access widths and unchanged state.
 CPUID feature bits remain conservative while the remaining SSE/MMX gaps close.
+
+
+RCPSS/RCPPS and RSQRTSS/RSQRTPS use host-independent software arithmetic.
+Their approximation bits need not match a particular processor: the separate
+131,072-record gate checks the architectural relative-error bound, special-value
+bits, preserved scalar lanes, and unchanged MXCSR with masks both set and clear.
+Both native and Rust outputs are validated, and CI replays that validation on
+Apple Silicon. MASKMOVQ/MASKMOVDQU write only selected guest bytes and honor
+address-size and FS addressing; masked-off bytes do not require mapped memory.
+
+
+The floating-point oracle now includes full packed arithmetic, square roots and
+all comparison predicates, not only scalar operations and conversions.
+CLFLUSH checks the addressed guest byte while requiring no host cache operation;
+PAUSE and memory fences preserve state under the sequential guest interpreter.
+Native tests retain the distinction between unaligned MOVNTQ (accepted) and
+aligned-only XMM streaming stores.

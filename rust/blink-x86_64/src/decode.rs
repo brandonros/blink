@@ -223,6 +223,8 @@ pub(super) fn operand(
         yaxpeax_x86::long_mode::Opcode::FXSAVE | yaxpeax_x86::long_mode::Opcode::FXRSTOR
     ) {
         512
+    } else if i.opcode() == yaxpeax_x86::long_mode::Opcode::CLFLUSH {
+        1
     } else if lea {
         8
     } else {

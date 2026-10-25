@@ -238,6 +238,13 @@ impl Cpu for X86 {
         } else {
             None
         };
+        if op == Op::CLFLUSH {
+            // Guest memory has no data/instruction cache. Still enforce the
+            // addressed byte's read permission, unlike a prefetch hint.
+            self.read(m, a.ok_or_else(bad)?)?;
+            self.rip = next;
+            return Ok(Step::Continue);
+        }
         let mmx = [a, b, c]
             .into_iter()
             .flatten()
@@ -293,6 +300,32 @@ impl Cpu for X86 {
             return Ok(Step::Continue);
         }
         match op {
+            Op::MASKMOVQ | Op::MASKMOVDQU => {
+                let data = a.ok_or_else(bad)?;
+                let bytes = self.vector(m, data)?;
+                let mask = self.vector(m, b.ok_or_else(bad)?)?;
+                let offset = if ins.prefixes.address_size() {
+                    self.regs[7] as u32 as u64
+                } else {
+                    self.regs[7]
+                };
+                let segment = match ins.prefixes.segment() {
+                    yaxpeax_x86::long_mode::Segment::FS => self.fs_base,
+                    yaxpeax_x86::long_mode::Segment::GS => return Err(bad()),
+                    _ => 0,
+                };
+                let address = offset.wrapping_add(segment);
+                for (n, byte) in mask[..data.width()].iter().enumerate() {
+                    if byte & 128 != 0 {
+                        m.check(address.wrapping_add(n as u64), 1, blink_core::Access::Write)?;
+                    }
+                }
+                for n in 0..data.width() {
+                    if mask[n] & 128 != 0 {
+                        m.store(address.wrapping_add(n as u64), bytes[n] as u64, 1)?;
+                    }
+                }
+            }
             Op::MOVHPS | Op::MOVHPD | Op::MOVLPS | Op::MOVLPD | Op::MOVHLPS | Op::MOVLHPS => {
                 let dst = a.ok_or_else(bad)?;
                 let src = b.ok_or_else(bad)?;
@@ -1353,6 +1386,43 @@ mod sse_memory_tests {
         cpu.fpu.status |= 4;
         assert!(matches!(cpu.step(&mut memory), Err(Error::ArithmeticFault)));
         assert_eq!(cpu.fpu.occupied, [false; 8]);
+    }
+    #[test]
+    fn masked_store_checks_selected_bytes_and_segment_address() {
+        let code = [0x64, 0x66, 0x0f, 0xf7, 0xc1];
+        let (mut cpu, mut memory) = run(&code, 0);
+        cpu.regs[7] = 8192;
+        cpu.fs_base = 4095;
+        cpu.xmm[1][0] = 128;
+        cpu.step(&mut memory).unwrap();
+        assert_eq!(memory.load(12287, 1).unwrap(), 0x5a);
+        memory.store(12287, 0, 1).unwrap();
+        cpu.rip = 4096;
+        cpu.xmm[1][1] = 128;
+        assert!(matches!(
+            cpu.step(&mut memory),
+            Err(Error::MemoryFault { address: 12288, .. })
+        ));
+        assert_eq!(memory.load(12287, 1).unwrap(), 0);
+        let (mut cpu, mut memory) = run(&[0x67, 0x66, 0x0f, 0xf7, 0xc1], 0);
+        cpu.regs[7] = 0xffff000000002000;
+        cpu.xmm[1][0] = 128;
+        cpu.step(&mut memory).unwrap();
+        assert_eq!(memory.load(8192, 1).unwrap(), 0x5a);
+    }
+    #[test]
+    fn flush_checks_one_byte_and_pause_preserves_flags() {
+        let (mut cpu, mut memory) = run(&[0x0f, 0xae, 0x38, 0xf3, 0x90], 12287);
+        cpu.flags = 0x8d7;
+        cpu.step(&mut memory).unwrap();
+        cpu.step(&mut memory).unwrap();
+        assert_eq!(cpu.flags, 0x8d7);
+        cpu.rip = 4096;
+        cpu.regs[0] = 12288;
+        assert!(matches!(
+            cpu.step(&mut memory),
+            Err(Error::MemoryFault { address: 12288, .. })
+        ));
     }
     #[test]
     fn insert_word_reads_only_two_bytes_at_page_end() {
