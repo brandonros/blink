@@ -898,6 +898,47 @@ impl Cpu for X86 {
                 self.write(m, a, bv)?;
                 self.write(m, b, av)?;
             }
+            Op::CMPXCHG8B | Op::CMPXCHG16B => {
+                let Value::Memory { address, .. } = a.ok_or_else(bad)? else {
+                    return Err(bad());
+                };
+                let wide = op == Op::CMPXCHG16B;
+                let width = if wide { 16 } else { 8 };
+                if wide && address & 15 != 0 {
+                    return Err(Error::MemoryFault {
+                        address,
+                        access: blink_core::Access::Write,
+                    });
+                }
+                // Both outcomes perform a memory write cycle. Validate before
+                // changing flags/registers, even when the comparison fails.
+                m.check(address, width, blink_core::Access::Write)?;
+                let mut bytes = [0u8; 16];
+                m.read(address, &mut bytes[..width], blink_core::Access::Read)?;
+                let old = u128::from_le_bytes(bytes);
+                let expected = if wide {
+                    self.regs[0] as u128 | ((self.regs[2] as u128) << 64)
+                } else {
+                    self.regs[0] as u32 as u128 | ((self.regs[2] as u32 as u128) << 32)
+                };
+                if old == expected {
+                    let replacement = if wide {
+                        self.regs[3] as u128 | ((self.regs[1] as u128) << 64)
+                    } else {
+                        self.regs[3] as u32 as u128 | ((self.regs[1] as u32 as u128) << 32)
+                    };
+                    m.write(address, &replacement.to_le_bytes()[..width])?;
+                    self.flags |= 64;
+                } else {
+                    self.regs[0] = if wide { old as u64 } else { old as u32 as u64 };
+                    self.regs[2] = if wide {
+                        (old >> 64) as u64
+                    } else {
+                        (old >> 32) as u32 as u64
+                    };
+                    self.flags &= !64;
+                }
+            }
             Op::CMPXCHG => {
                 let dst = a.ok_or_else(bad)?;
                 let src = b.ok_or_else(bad)?;
@@ -1079,7 +1120,9 @@ impl Cpu for X86 {
                 } else if leaf == 1 {
                     // Implemented instruction groups, qualified by native oracles;
                     // see rust/CPU-FEATURES.md. Do not infer bits from the decoder.
-                    self.regs[2] = (1 << 15) | (1 << 23) | (1 << 24) | (1 << 25) | (1 << 26);
+                    self.regs[1] = 1 << 13; // CMPXCHG16B
+                    self.regs[2] =
+                        (1 << 8) | (1 << 15) | (1 << 23) | (1 << 24) | (1 << 25) | (1 << 26);
                 }
             }
             Op::LAHF => self.regs[0] = (self.regs[0] & !0xff00) | ((self.flags & 0xd5 | 2) << 8),
@@ -1187,6 +1230,39 @@ impl Cpu for X86 {
 mod tests {
     use super::*;
     use blink_core::Permissions;
+    #[test]
+    fn double_compare_exchange_faults_preserve_registers_flags_and_memory() {
+        for wide in [false, true] {
+            for address in [0x2000, 0x2ffc, 0x2001] {
+                let mut memory = Memory::new(8192);
+                memory.map(0x1000, 4096, Permissions::RX).unwrap();
+                memory.map(0x2000, 4096, Permissions::RW).unwrap();
+                let code: &[u8] = if wide {
+                    &[0xf0, 0x48, 0x0f, 0xc7, 0x0f]
+                } else {
+                    &[0xf0, 0x0f, 0xc7, 0x0f]
+                };
+                memory.initialize(0x1000, code).unwrap();
+                memory.store(0x2000, 42, 8).unwrap();
+                if address == 0x2000 || (!wide && address == 0x2001) {
+                    memory.protect(0x2000, 4096, Permissions::RX).unwrap();
+                }
+                let mut cpu = X86::new(0x1000, 0);
+                cpu.regs[7] = address;
+                cpu.regs[0] = 999;
+                cpu.regs[2] = 888;
+                cpu.flags = 0x8d7;
+                let registers = cpu.regs;
+                assert!(matches!(
+                    cpu.step(&mut memory),
+                    Err(Error::MemoryFault { .. })
+                ));
+                assert_eq!(cpu.regs, registers);
+                assert_eq!(cpu.flags, 0x8d7);
+                assert_eq!(memory.load(0x2000, 8).unwrap(), 42);
+            }
+        }
+    }
     #[test]
     fn page_end() {
         let mut m = Memory::new(4096);
@@ -1433,8 +1509,8 @@ mod sse_memory_tests {
         let (mut cpu, mut memory) = run(&[0x0f, 0xa2], 0);
         cpu.regs[0] = 1;
         cpu.step(&mut memory).unwrap();
-        assert_eq!(cpu.regs[2], 0x07808000);
-        assert_eq!(cpu.regs[1], 0); // no SSE3/SSSE3/SSE4/AVX
+        assert_eq!(cpu.regs[2], 0x07808100);
+        assert_eq!(cpu.regs[1], 1 << 13); // CX16, no SSE3/SSSE3/SSE4/AVX
         cpu.rip = 4096;
         cpu.regs[0] = 7;
         cpu.regs[1] = 0;

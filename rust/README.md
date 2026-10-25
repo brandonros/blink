@@ -173,7 +173,7 @@ The preexisting C executable, config, clean-build log and hash manifest are in
 `o/rust-reference` directory. On this Linux x86_64 host, Rust, C interpreter and
 native Linux comparisons retain per-fixture results. The expanded filesystem,
 MXCSR restart, socketpair and alternate-stack cases expose additional C baseline
-differences; consult the report rather than treating the C runtime as the oracle. All 23 fixtures pass Rust/native. C differs on vfork memory sharing and
+differences; consult the report rather than treating the C runtime as the oracle. All 24 fixtures pass Rust/native. C differs on vfork memory sharing and
 returns extra F_GETFL flags on a CLOEXEC pipe in the descriptor fixture. C JIT fails the pipe/fork
 fixture and crashes during the exec fixture, including after a clean rebuild.
 Those failures remain visible; C is a comparison target, not an infallible oracle.
@@ -259,7 +259,7 @@ children, and remain through exec. Threads share their process timer; pending
 standard signals coalesce. Wall/monotonic clock queries use host clock adapters.
 Nanosleep and absolute/relative clock_nanosleep cooperate with scheduling and
 write remaining time on interruption. Virtual/profiling CPU timers and other
-clock IDs remain unsupported. The native comparison suite now has 23 compiled
+clock IDs remain unsupported. The native comparison suite now has 24 compiled
 fixtures, including real-timer delivery, fork inheritance, and interrupted sleep.
 
 Packed conversion memory operands are checked at their architectural width: CVTDQ2PD and CVTPS2PD read eight bytes, even though the decoder reports a 16-byte vector width. Page-boundary and unmasked-exception tests guard source accesses and whole-destination preservation.
@@ -473,3 +473,8 @@ and without `--jitless`. Normal arithmetic also agrees with native Linux and
 the preserved C interpreter. A separate 100,000-iteration JavaScript loop prints
 `14999950000` and exits cleanly; this does not establish complete V8 coverage
 or implement a Rust host JIT.
+
+Double-width CMPXCHG8B/16B is implemented as one cooperative interpreter step,
+with write-access checks on success and failure, architectural register widths,
+ZF-only updates and CX16 alignment checks. CPUID advertises CX8/CX16 after
+native comparisons and fault-state tests; CI replays the fixture on Darwin arm64.

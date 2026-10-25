@@ -1,7 +1,7 @@
 # AMD64 feature contract
 
 CPUID is implemented independently of yaxpeax's decoder acceptance. Leaf 1 EDX
-advertises CMOV (15), MMX (23), FXSR (24), SSE (25), and SSE2 (26). Other optional feature bits
+advertises CX8 (8), CMOV (15), MMX (23), FXSR (24), SSE (25), and SSE2 (26). Leaf 1 ECX advertises CX16 (13). Other optional feature bits
 remain clear, including FPU, SSE3, SSSE3, SSE4, AVX, BMI and extended state.
 Individual instructions outside these groups may work without their entire
 feature group being advertised. This contract does not claim full Linux ABI,
@@ -9,6 +9,7 @@ JIT, debugger, or x87 parity.
 
 | Group | Implemented behavior | Qualification |
 | --- | --- | --- |
+| CX8 / CX16 | CMPXCHG8B/16B, locked and unlocked forms, write-access validation on both outcomes, 16-byte alignment for CX16 | Native success/failure and upper-register/flag checks; read-only, page-crossing and alignment fault tests |
 | CMOV | All integer conditional moves, FCMOVcc and FCOMI/FUCOMI forms | Original cmov assembly gate, native floating-point comparisons and 4,608 conditional-move/stack-state records |
 | MMX | MOVD/Q, packed wrap/saturating arithmetic, products, multiply-add, comparisons, logical operations, shifts, packs/unpacks, EMMS; physical x87 aliases, tags/TOP and pending exception checks | 62 MMX cases in the packed native oracle; x87/FXSAVE transition fixture; memory/fault tests |
 | FXSR | FXSAVE/FXRSTOR including REX.W format, x87 tags/registers/control/status, XMM0–15, MXCSR, reserved-bit checks and software tail | Native save/restore fixture, signal return and alignment/state tests |

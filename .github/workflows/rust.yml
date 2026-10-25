@@ -74,6 +74,7 @@ jobs:
           path: |
             target/original-asm/results.json
             target/differential/results.json
+            target/differential/atomic-x86_64
             target/tcp-smoke/results.json
             target/float-regressions/float-x86_64
             target/float-regressions/native.bin
@@ -109,3 +110,4 @@ jobs:
             cmp target/oracle/$suite-regressions/native.bin target/oracle/$suite-actual.bin
           done
           python3 rust/approx-regressions.py --replay target/oracle/approx-regressions
+          cargo run --release --locked -p blink-cli -- target/oracle/differential/atomic-x86_64
