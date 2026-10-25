@@ -1,0 +1,43 @@
+/* Native x87 result and status oracle; explicit ten-byte extended values. */
+static long call(long n,long a,long b,long c) {long r;__asm__ volatile("syscall":"=a"(r):"a"(n),"D"(a),"S"(b),"d"(c):"rcx","r11","memory");return r;}
+static const unsigned long values[]={0,0x8000000000000000ul,0x3ff0000000000000ul,0xbff0000000000000ul,0x3fd5555555555555ul,0x7ff0000000000000ul,0xfff0000000000000ul,0x7ff8000000000123ul,0xfff0000000000123ul,1,0x0010000000000000ul,0x7feffffffffffffful,0x3ca0000000000000ul};
+struct extended {unsigned long fraction;unsigned short exponent;} __attribute__((packed));
+static const struct extended extended[]={
+{0,0},{0,0x8000},{0x8000000000000000ul,0x3fff},{0x8000000000000000ul,0xbfff},
+{0xaaaaaaaaaaaaaaaaul,0x3ffd},{0x8000000000000000ul,0x7fff},{0x8000000000000000ul,0xffff},
+{0xc000000000000123ul,0x7fff},{0x8000000000000123ul,0xffff},{1,0},{0x8000000000000000ul,1},
+{0xfffffffffffffffful,0x7ffe},{0x8000000000000000ul,0x3fbf}};
+struct record {unsigned long a,b;unsigned char result[10];unsigned short status,control,op;};
+#define OPERATE(instruction) __asm__ volatile("fninit; fldcw %4; fldl %2; fldl %3; " instruction "; fnstsw %1; fstpt %0; fninit" :"=m"(r.result),"=m"(r.status):"m"(r.a),"m"(r.b),"m"(r.control):"st","st(1)","memory")
+#define OPERATE80(instruction) __asm__ volatile("fninit; fldcw %4; fldt %2; fldt %3; " instruction "; fnstsw %1; fstpt %0; fninit" :"=m"(r.result),"=m"(r.status):"m"(left),"m"(right),"m"(r.control):"st","st(1)","memory")
+#define STORE80(instruction) __asm__ volatile("fninit; fldcw %4; fldt %2; fldt %3; " instruction " %0; fnstsw %1; fninit" :"=m"(r.result),"=m"(r.status):"m"(left),"m"(right),"m"(r.control):"st","st(1)","memory")
+#define COMPARE80(instruction) do { __asm__ volatile("fninit; fldcw %4; fldt %2; fldt %3; " instruction "; pushfq; popq %0; fnstsw %1; fninit" :"=m"(r.result),"=m"(r.status):"m"(left),"m"(right),"m"(r.control):"st","st(1)","memory","cc"); r.result[0]&=0xd5;r.result[1]&=8;for(int n=2;n<10;n++)r.result[n]=0; } while(0)
+__attribute__((noreturn)) void _start(void) {
+    for(unsigned op=0;op<19;op++) for(unsigned mode=0;mode<4;mode++) for(unsigned pair=0;pair<169+256;pair++) {
+        struct record r={0};r.op=op;r.control=0x37f|(mode<<10);
+        if(pair<169) {r.a=values[pair/13];r.b=values[pair%13];}
+        else {
+            unsigned long seed=(pair-168)*0x9e3779b97f4a7c15ul;
+            seed ^= seed>>12; seed ^= seed<<25; seed ^= seed>>27;r.a=seed*0x2545f4914f6cdd1dul;
+            seed ^= seed>>12; seed ^= seed<<25; seed ^= seed>>27;r.b=seed*0x2545f4914f6cdd1dul;
+        }
+        struct extended left,right;
+        if(pair<169) {left=extended[pair/13];right=extended[pair%13];}
+        else {left.fraction=r.a|0x8000000000000000ul;left.exponent=(r.b>>32)&0xffff;right.fraction=r.b|0x8000000000000000ul;right.exponent=(r.a>>32)&0xffff;}
+        switch(op) {
+        case 8:OPERATE80("fcom %%st(1)");break;
+        case 9:OPERATE80("fucompp");break;
+        case 10:COMPARE80("fcomip %%st(1)");break;
+        case 11:COMPARE80("fucomip %%st(1)");break;
+        case 12:OPERATE80("frndint");break;
+        case 13:STORE80("fstps");break;
+        case 14:STORE80("fstpl");break;
+        case 15:STORE80("fistpq");break;
+        case 16:STORE80("fistpl");break;
+        case 17:STORE80("fistps");break;
+        case 18:STORE80("fisttpq");break;
+        case 4:OPERATE80("faddp");break;case 5:OPERATE80("fsubp");break;case 6:OPERATE80("fmulp");break;case 7:OPERATE80("fdivp");break;case 0:OPERATE("faddp");break;case 1:OPERATE("fsubp");break;case 2:OPERATE("fmulp");break;case 3:OPERATE("fdivp");break;}
+        if(call(1,1,(long)&r,sizeof r)!=sizeof r) {call(231,1,0,0);__builtin_unreachable();}
+    }
+    call(231,0,0,0);__builtin_unreachable();
+}

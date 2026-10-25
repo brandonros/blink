@@ -66,7 +66,7 @@ pub struct SignalContext {
     pub use_stack: bool,
 }
 impl X86 {
-    /// Linux rt_sigframe header: restorer, ucontext, siginfo. Legacy FP area preserves the implemented XMM registers; x87 remains unsupported.
+    /// Linux rt_sigframe header: restorer, ucontext, siginfo. Legacy FP area preserves the implemented x87 and XMM registers.
     pub fn enter_signal(
         &mut self,
         memory: &mut Memory,
@@ -141,7 +141,7 @@ impl X86 {
         frame[INFO + 20..INFO + 24].copy_from_slice(&info.uid.to_le_bytes());
         frame[INFO + 24..INFO + 28].copy_from_slice(&info.status.to_le_bytes());
         put(&mut frame, UC + 224, sp + 440);
-        frame[440..442].copy_from_slice(&0x37fu16.to_le_bytes());
+        self.fpu.save_legacy(&mut frame[440..]);
         frame[464..468].copy_from_slice(&self.mxcsr.to_le_bytes());
         frame[468..472].copy_from_slice(&0xffffu32.to_le_bytes());
         for n in 0..16 {
@@ -155,6 +155,7 @@ impl X86 {
         self.rip = handler;
         self.flags &= !1024;
         self.mxcsr = 0x1f80;
+        self.fpu = super::x87::Fpu::default();
         Ok(())
     }
     pub fn restore_signal(&mut self, memory: &Memory) -> Result<u64> {
@@ -173,7 +174,11 @@ impl X86 {
         let pointer = get(UC + 224);
         let mut xmm = [[0; 16]; 16];
         let mut mxcsr = 0x1f80;
+        let mut fpu = super::x87::Fpu::default();
         if pointer != 0 {
+            let mut legacy = [0; 160];
+            memory.read(pointer, &mut legacy, Access::Read)?;
+            fpu = super::x87::Fpu::restore_legacy(&legacy);
             mxcsr = memory.load(pointer.checked_add(24).ok_or(Error::ResourceLimit)?, 4)? as u32;
             if mxcsr & !0xffff != 0 {
                 return Err(Error::InvalidConfig(
@@ -191,6 +196,7 @@ impl X86 {
             }
         }
         self.xmm = xmm;
+        self.fpu = fpu;
         self.mxcsr = mxcsr;
         for (n, index) in ORDER.iter().enumerate() {
             self.regs[*index] = get(UC + 40 + n * 8);

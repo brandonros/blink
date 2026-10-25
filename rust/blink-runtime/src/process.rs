@@ -16,14 +16,14 @@ use std::{
 };
 #[derive(Clone)]
 enum Engine {
-    X86(blink_x86_64::X86),
-    Arm(blink_aarch64::Aarch64),
+    X86(Box<blink_x86_64::X86>),
+    Arm(Box<blink_aarch64::Aarch64>),
 }
 impl Engine {
     fn new(arch: GuestArch, entry: u64, stack: u64) -> Self {
         match arch {
-            GuestArch::X86_64 => Self::X86(blink_x86_64::X86::new(entry, stack)),
-            GuestArch::Aarch64 => Self::Arm(blink_aarch64::Aarch64::new(entry, stack)),
+            GuestArch::X86_64 => Self::X86(Box::new(blink_x86_64::X86::new(entry, stack))),
+            GuestArch::Aarch64 => Self::Arm(Box::new(blink_aarch64::Aarch64::new(entry, stack))),
         }
     }
     fn stack(&mut self, value: u64) {
@@ -40,8 +40,8 @@ impl Engine {
     }
     fn cpu(&mut self) -> &mut dyn Cpu {
         match self {
-            Self::X86(c) => c,
-            Self::Arm(c) => c,
+            Self::X86(c) => c.as_mut(),
+            Self::Arm(c) => c.as_mut(),
         }
     }
 }

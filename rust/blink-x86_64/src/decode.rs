@@ -8,6 +8,7 @@ use yaxpeax_x86::long_mode::{
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Value {
     Vector(usize),
+    FloatStack(usize),
     Register {
         index: usize,
         width: usize,
@@ -25,6 +26,7 @@ impl Value {
             Self::Register { width, .. } | Self::Memory { width, .. } => width,
             Self::Immediate(_) => 8,
             Self::Vector(_) => 16,
+            Self::FloatStack(_) => 10,
         }
     }
 }
@@ -50,6 +52,9 @@ pub(super) fn instruction(memory: &Memory, pc: u64) -> Result<(Instruction, u64)
 fn register(reg: RegSpec) -> Option<Value> {
     let class = reg.class();
     let num = reg.num() as usize;
+    if class == register_class::ST && num < 8 {
+        return Some(Value::FloatStack(num));
+    }
     if class == register_class::X && num < 16 {
         return Some(Value::Vector(num));
     }
@@ -208,7 +213,7 @@ pub(super) fn operand(
     } else {
         i.mem_size().and_then(|s| s.bytes_size()).ok_or_else(bad)? as usize
     };
-    if !matches!(width, 1 | 2 | 4 | 8 | 16) {
+    if !matches!(width, 1 | 2 | 4 | 8 | 10 | 16) {
         return Err(bad());
     }
     Ok(Value::Memory {

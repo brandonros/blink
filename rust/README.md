@@ -280,3 +280,25 @@ rt_sigsuspend are supported; sigsuspend restores the original mask on handler
 return and returns EINTR even with SA_RESTART. The native fixture checks these
 behaviors together with child-exit notifications. Child resource-usage accounting,
 stop/continue notifications, and queued realtime delivery remain unsupported.
+
+## Initial x87 interpreter
+
+The guest owns an eight-entry 80-bit register stack, tags, control/status words,
+and deferred arithmetic exceptions. Software APFloat handles extended-precision
+add/subtract/multiply/divide, comparisons, integral rounding, integer and float
+loads/stores, and stack operations. Signal handlers start with a fresh x87 state;
+sigreturn restores the saved stack and control word. An unmasked exception
+preserves the destination/stack and faults on the next waiting instruction.
+
+`python3 rust/x87-regressions.py` compares 32,300 native AMD64 result/status records,
+including 80-bit extrema, NaNs, denormals, four rounding modes, comparisons and
+conversions. Tests also cover a ten-byte source at a page boundary, masked stack
+overflow, deferred faults, and signal-frame preservation. The adapter handles
+x87 NaN priority and the APFloat directed-overflow flag difference. CI replays
+this native-generated fixture on Apple Silicon as well as the SSE fixture.
+
+This is partial x87 support. Reduced-precision (24/53-bit) arithmetic control,
+transcendentals, square root, environment/save-state instructions and complete
+unsupported-encoding behavior remain; unsupported operations fail explicitly.
+CPUID still does not advertise complete FPU/SSE2 support. No Node/Bun workload or
+new agent-platform checkpoint is established by these instruction tests.

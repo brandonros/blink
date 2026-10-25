@@ -2,6 +2,7 @@
 mod decode;
 mod float;
 mod signal;
+mod x87;
 use blink_core::{Cpu, Error, Memory, Result, Step};
 use decode::Value;
 pub use signal::{SignalContext, SignalInfo, SignalStack};
@@ -14,6 +15,7 @@ pub struct X86 {
     pub fs_base: u64,
     pub xmm: [[u8; 16]; 16],
     pub mxcsr: u32,
+    pub(crate) fpu: x87::Fpu,
     pub ticks: u64,
 }
 fn mask(w: usize) -> u64 {
@@ -35,6 +37,7 @@ impl X86 {
             fs_base: 0,
             xmm: [[0; 16]; 16],
             mxcsr: 0x1f80,
+            fpu: x87::Fpu::default(),
             ticks: 0,
         };
         c.regs[4] = stack;
@@ -43,7 +46,7 @@ impl X86 {
     fn read(&self, m: &Memory, v: Value) -> Result<u64> {
         Ok(match v {
             Value::Immediate(v) => v,
-            Value::Vector(_) => {
+            Value::Vector(_) | Value::FloatStack(_) => {
                 return Err(Error::UnsupportedInstruction {
                     pc: self.rip,
                     encoding: 0,
@@ -229,7 +232,7 @@ impl Cpu for X86 {
             None
         };
         self.rip = next;
-        if self.float(m, op, a, b, c, pc)? {
+        if self.x87(m, op, a, b, pc)? || self.float(m, op, a, b, c, pc)? {
             return Ok(Step::Continue);
         }
         match op {
