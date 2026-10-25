@@ -13,7 +13,7 @@ struct record {unsigned long a,b;unsigned char result[10];unsigned short status,
 #define STORE80(instruction) __asm__ volatile("fninit; fldcw %4; fldt %2; fldt %3; " instruction " %0; fnstsw %1; fninit" :"=m"(r.result),"=m"(r.status):"m"(left),"m"(right),"m"(r.control):"st","st(1)","rax","cc","memory")
 #define COMPARE80(instruction) do { __asm__ volatile("fninit; fldcw %4; fldt %2; fldt %3; " instruction "; pushfq; popq %0; fnstsw %1; fninit" :"=m"(r.result),"=m"(r.status):"m"(left),"m"(right),"m"(r.control):"st","st(1)","memory","cc"); r.result[0]&=0xd5;r.result[1]&=8;for(int n=2;n<10;n++)r.result[n]=0; } while(0)
 __attribute__((noreturn)) void _start(void) {
-    for(unsigned op=0;op<25;op++) for(unsigned mode=0;mode<12;mode++) for(unsigned pair=0;pair<169+256;pair++) {
+    for(unsigned op=0;op<26;op++) for(unsigned mode=0;mode<12;mode++) for(unsigned pair=0;pair<169+256;pair++) {
         struct record r={0};r.op=op;r.control=0x7f|((mode<4?0:mode<8?2:3)<<8)|((mode&3)<<10);
         if(pair<169) {r.a=values[pair/13];r.b=values[pair%13];}
         else {
@@ -39,6 +39,7 @@ __attribute__((noreturn)) void _start(void) {
         case 22:OPERATE80("fxtract; fxch %%st(1)");break;
         case 23:OPERATE80("1: fprem; fnstsw %%ax; testw $0x400,%%ax; jnz 1b");break;
         case 24:OPERATE80("1: fprem1; fnstsw %%ax; testw $0x400,%%ax; jnz 1b");break;
+        case 25:STORE80("fbstp");break;
         case 20:OPERATE80("fscale");break;
         case 19:OPERATE80("fsqrt");break;
         case 18:STORE80("fisttpq");break;
@@ -80,6 +81,15 @@ __attribute__((noreturn)) void _start(void) {
         struct extended left={0,0},right=sample<13?extended[sample]:special[sample-13];
         struct record r={0};r.a=right.fraction;r.b=right.exponent;r.op=58+empty;r.control=0x37f;
         if(empty){OPERATE80("ffree %%st(0); fxam");}else{OPERATE80("fxam");}
+        if(call(1,1,(long)&r,sizeof r)!=sizeof r) {call(231,1,0,0);__builtin_unreachable();}
+    }
+    for(unsigned sign=0;sign<2;sign++) for(unsigned sample=0;sample<1024;sample++) {
+        unsigned long number=(sample*0x9e3779b97f4a7c15ul)%1000000000000000000ul;
+        if(sample==0)number=0;if(sample==1)number=999999999999999999ul;
+        unsigned char bcd[10]={0};unsigned long remaining=number;
+        for(int n=0;n<9;n++){unsigned lo=remaining%10;remaining/=10;unsigned hi=remaining%10;remaining/=10;bcd[n]=lo|(hi<<4);}bcd[9]=sign?128:0;
+        struct record r={0};r.a=number;r.b=sign;r.op=60;r.control=0x37f;
+        __asm__ volatile("fninit; fbld %2; fnstsw %1; fstpt %0":"=m"(r.result),"=m"(r.status):"m"(bcd):"st","memory");
         if(call(1,1,(long)&r,sizeof r)!=sizeof r) {call(231,1,0,0);__builtin_unreachable();}
     }
     call(231,0,0,0);__builtin_unreachable();

@@ -337,6 +337,8 @@ impl X86 {
                 | Op::FNOP
                 | Op::FLD
                 | Op::FILD
+                | Op::FBLD
+                | Op::FBSTP
                 | Op::FLD1
                 | Op::FLDL2T
                 | Op::FLDL2E
@@ -493,6 +495,61 @@ impl X86 {
                 self.fpu.exception(0);
             }
             Op::WAIT | Op::FNOP => {}
+            Op::FBLD => {
+                let Value::Memory { address, width: 10 } = b.or(a).ok_or_else(bad)? else {
+                    return Err(bad());
+                };
+                let mut bytes = [0; 10];
+                memory.read(address, &mut bytes, blink_core::Access::Read)?;
+                let mut number = 0u128;
+                for byte in bytes[..9].iter().rev() {
+                    if byte & 15 > 9 || byte >> 4 > 9 {
+                        return Err(bad());
+                    }
+                    number = number * 100 + (byte >> 4) as u128 * 10 + (byte & 15) as u128;
+                }
+                let mut value = Extended::from_u128(number).value;
+                if bytes[9] & 128 != 0 {
+                    value = -value;
+                }
+                self.fpu.push(value.to_bits(), 0);
+            }
+            Op::FBSTP => {
+                let Value::Memory { address, width: 10 } = a.ok_or_else(bad)? else {
+                    return Err(bad());
+                };
+                memory.check(address, 10, blink_core::Access::Write)?;
+                let mut exceptions = 0;
+                let bits = self.fpu.get(0, &mut exceptions);
+                let value = Extended::from_bits(bits);
+                let integer = value.to_i128_r(64, self.fpu.round(), &mut false);
+                let invalid = integer.status.contains(Status::INVALID_OP)
+                    || integer.value.unsigned_abs() > 999_999_999_999_999_999;
+                let mut bytes = [0u8; 10];
+                self.fpu.status &= !0x200;
+                if invalid {
+                    exceptions |= 1;
+                    bytes.copy_from_slice(&INDEFINITE.to_le_bytes()[..10]);
+                } else {
+                    exceptions |= flags(integer.status);
+                    if Extended::from_i128(integer.value).value.abs() > value.abs() {
+                        self.fpu.status |= 0x200;
+                    }
+                    let mut number = integer.value.unsigned_abs();
+                    for byte in &mut bytes[..9] {
+                        let low = number % 10;
+                        number /= 10;
+                        let high = number % 10;
+                        number /= 10;
+                        *byte = (low | (high << 4)) as u8;
+                    }
+                    bytes[9] = if value.is_negative() { 128 } else { 0 };
+                }
+                if self.fpu.exception(exceptions) {
+                    memory.write(address, &bytes)?;
+                    self.fpu.pop();
+                }
+            }
             Op::FLD | Op::FILD => {
                 let mut exceptions = 0;
                 let source = b.or(a).ok_or_else(bad)?;
