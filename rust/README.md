@@ -145,9 +145,9 @@ experimental runtime, including PR #218 changes. Builder checkout:
 The preexisting C executable, config, clean-build log and hash manifest are in
 `/workspace/work/blink-baseline`. The clean reference build uses the separate
 `o/rust-reference` directory. On this Linux x86_64 host, Rust, C interpreter and
-native Linux pass the original fixtures plus new vfork, filesystem/sendfile,
-and signal-restart comparisons. All 12 fixtures pass Rust/native; the descriptor
-fixture exposes C returning extra F_GETFL flags on a CLOEXEC pipe. C JIT fails the pipe/fork
+native Linux agree on the original fixtures, filesystem/sendfile, and signal
+restart. All 12 fixtures pass Rust/native. C differs on vfork memory sharing and
+returns extra F_GETFL flags on a CLOEXEC pipe in the descriptor fixture. C JIT fails the pipe/fork
 fixture and crashes during the exec fixture, including after a clean rebuild.
 Those failures remain visible; C is a comparison target, not an infallible oracle.
 The Alpine OCI layer used for smoke tests is
