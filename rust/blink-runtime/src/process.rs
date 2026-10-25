@@ -1,5 +1,7 @@
 //! Cooperative guest processes. No host fork, host signals, or blocking guest pipes.
+mod internet;
 mod socket;
+mod time;
 mod virtual_fs;
 use crate::{elf, Command, RunOutcome, RuntimeConfig, Termination};
 use blink_core::{Access, Cpu, Error, GuestArch, Memory, Permissions, Result, Step};
@@ -82,6 +84,8 @@ struct Process {
     futex: Option<u64>,
     futex_syscall: Option<u64>,
     poll_deadline: Option<Instant>,
+    sleep_deadline: Option<Instant>,
+    real_timer: Rc<RefCell<time::RealTimer>>,
     vfork_wait: Option<u32>,
     vfork_parent: Option<u32>,
     pending: Option<(u64, [u64; 6])>,
@@ -259,6 +263,8 @@ pub(super) fn run(
             futex: None,
             futex_syscall: None,
             poll_deadline: None,
+            sleep_deadline: None,
+            real_timer: Rc::new(RefCell::new(time::RealTimer::default())),
             vfork_wait: None,
             vfork_parent: None,
             fds: Rc::new(RefCell::new(BTreeMap::from([
@@ -292,6 +298,24 @@ pub(super) fn run(
         let Some(mut process) = processes.remove(&pid) else {
             continue;
         };
+        if process.real_timer.borrow_mut().expired() {
+            let alarm = 1u64 << 13;
+            if process.signal_mask & alarm != 0 {
+                if let Some(target) = processes
+                    .values_mut()
+                    .find(|p| p.group == process.group && p.signal_mask & alarm == 0)
+                {
+                    target.pending_signals |= alarm;
+                    target.signal_senders[13] = 0;
+                } else {
+                    process.pending_signals |= alarm;
+                    process.signal_senders[13] = 0;
+                }
+            } else {
+                process.pending_signals |= alarm;
+                process.signal_senders[13] = 0;
+            }
+        }
         let mut event = Event::Ready;
         // A quantum bounds cancellation latency and keeps runnable guests fair.
         for _ in 0..256 {
@@ -351,6 +375,13 @@ pub(super) fn run(
                     GuestArch::X86_64 => number,
                     GuestArch::Aarch64 => match number {
                         63 => 0,
+                        101 => 35,
+                        102 => 36,
+                        103 => 38,
+                        113 => 228,
+                        114 => 229,
+                        115 => 230,
+                        169 => 96,
                         25 => 72,
                         160 => 63,
                         174 => 102,
@@ -364,6 +395,8 @@ pub(super) fn run(
                         158 => 115,
                         159 => 116,
                         198 => 41,
+                        208 => 54,
+                        209 => 55,
                         65 => 19,
                         204 => 51,
                         205 => 52,
@@ -433,6 +466,16 @@ pub(super) fn run(
                     },
                 };
                 let ret = match nr {
+                    36..=38 => time::interval(&process, nr, args)?,
+                    96 | 201 | 228 | 229 => time::clock(&process, nr, args)?,
+                    35 | 230 => match time::sleep(&mut process, nr, args)? {
+                        Some(result) => result,
+                        None => {
+                            process.pending = Some((number, args));
+                            event = Event::Blocked;
+                            break;
+                        }
+                    },
                     60 | 231 => {
                         if nr == 231 {
                             processes.retain(|_, p| p.group != process.group);
@@ -711,9 +754,42 @@ pub(super) fn run(
                             }
                         }
                     }
+                    54 | 55 => match process.fds.borrow().get(&(args[0] as i32)) {
+                        Some(Fd::Internet(s)) => {
+                            internet::option(&process, &mut s.borrow_mut(), args, nr == 54)?
+                        }
+                        None => errno(9),
+                        Some(Fd::Socket(_) | Fd::UnixSocket { .. }) => {
+                            return Err(Error::UnsupportedSyscall(number))
+                        }
+                        _ => errno(88),
+                    },
                     19 => {
                         let fd = process.fds.borrow().get(&(args[0] as i32)).cloned();
                         match fd.as_ref() {
+                            Some(Fd::Internet(endpoint)) => {
+                                let result = internet::vectored(
+                                    &mut process.memory.borrow_mut(),
+                                    &endpoint.borrow(),
+                                    args[1],
+                                    args[2],
+                                    false,
+                                )?;
+                                match result {
+                                    None => {
+                                        process.pending = Some((number, args));
+                                        event = Event::Blocked;
+                                        break;
+                                    }
+                                    Some(result) => {
+                                        if result == errno(32) && args[3] & 0x4000 == 0 {
+                                            process.pending_signals |= 1 << 12;
+                                            process.signal_senders[12] = process.group;
+                                        }
+                                        result
+                                    }
+                                }
+                            }
                             Some(Fd::Socket(endpoint)) => {
                                 match socket::vectored(
                                     &mut process.memory.borrow_mut(),
@@ -735,6 +811,9 @@ pub(super) fn run(
                         }
                     }
                     51 | 52 => match process.fds.borrow().get(&(args[0] as i32)) {
+                        Some(Fd::Internet(s)) => {
+                            internet::name(&process, &s.borrow(), args, nr == 52)?
+                        }
                         Some(Fd::Socket(_)) => socket::name(&process, args)?,
                         Some(Fd::UnixSocket { .. }) if nr == 51 => socket::name(&process, args)?,
                         Some(Fd::UnixSocket { .. }) => errno(107),
@@ -744,6 +823,16 @@ pub(super) fn run(
                     53 => socket::pair(&process, args, &mut next_pipe)?,
                     48 => match process.fds.borrow().get(&(args[0] as i32)) {
                         None => errno(9),
+                        Some(Fd::Internet(s)) => {
+                            if args[1] > 2 {
+                                errno(22)
+                            } else {
+                                s.borrow()
+                                    .host
+                                    .shutdown(args[1])
+                                    .map_or_else(|e| blink_linux::errno(&e), |_| 0)
+                            }
+                        }
                         Some(Fd::Socket(endpoint)) => {
                             if args[1] > 2 {
                                 errno(22)
@@ -761,6 +850,30 @@ pub(super) fn run(
                         }
                         let fd = process.fds.borrow().get(&(args[0] as i32)).cloned();
                         match fd.as_ref() {
+                            Some(Fd::Internet(endpoint)) => {
+                                let result = internet::transfer(
+                                    &mut process.memory.borrow_mut(),
+                                    &endpoint.borrow(),
+                                    args[1],
+                                    args[2],
+                                    nr == 44,
+                                    args[3],
+                                )?;
+                                match result {
+                                    None => {
+                                        process.pending = Some((number, args));
+                                        event = Event::Blocked;
+                                        break;
+                                    }
+                                    Some(result) => {
+                                        if result == errno(32) && args[3] & 0x4000 == 0 {
+                                            process.pending_signals |= 1 << 12;
+                                            process.signal_senders[12] = process.group;
+                                        }
+                                        result
+                                    }
+                                }
+                            }
                             Some(Fd::Socket(endpoint)) => {
                                 let result = socket::transfer(
                                     &mut process.memory.borrow_mut(),
@@ -791,6 +904,11 @@ pub(super) fn run(
                         }
                     }
                     41 => {
+                        if matches!(args[0], 2 | 10) {
+                            let result = internet::create(config, &process, args, &mut next_pipe)?;
+                            process.cpu.cpu().set_result(result);
+                            continue;
+                        }
                         if args[0] != 1 || args[1] & !(0x80000 | 0x800) != 1 || args[2] != 0 {
                             return Err(Error::UnsupportedSyscall(number));
                         }
@@ -815,6 +933,20 @@ pub(super) fn run(
                         let fds = process.fds.borrow();
                         match fds.get(&(args[0] as i32)) {
                             None => errno(9),
+                            Some(Fd::Internet(s)) => {
+                                match internet::connect(
+                                    &process.memory.borrow(),
+                                    &mut s.borrow_mut(),
+                                    args,
+                                )? {
+                                    Some(result) => result,
+                                    None => {
+                                        process.pending = Some((number, args));
+                                        event = Event::Blocked;
+                                        break;
+                                    }
+                                }
+                            }
                             Some(Fd::UnixSocket { .. }) => {
                                 if args[2] < 3 || args[2] > 110 {
                                     errno(22)
@@ -964,6 +1096,10 @@ pub(super) fn run(
                                         Err(_) => errno(14),
                                         Ok(flag) => {
                                             match process.fds.borrow().get(&(args[0] as i32)) {
+                                                Some(Fd::Internet(s)) => {
+                                                    s.borrow_mut().nonblock = flag != 0;
+                                                    0
+                                                }
                                                 Some(Fd::Socket(s)) => {
                                                     s.nonblock.set(flag != 0);
                                                     0
@@ -1049,6 +1185,9 @@ pub(super) fn run(
                                         }
                                     }
                                     Fd::Directory(_) => 0x18000,
+                                    Fd::Internet(s) => {
+                                        2 | if s.borrow().nonblock { 0x800 } else { 0 }
+                                    }
                                     Fd::Socket(s) => 2 | if s.nonblock.get() { 0x800 } else { 0 },
                                     Fd::UnixSocket { nonblock, .. } => {
                                         2 | if *nonblock { 0x800 } else { 0 }
@@ -1071,6 +1210,10 @@ pub(super) fn run(
                                     }
                                 },
                                 4 => match &fd {
+                                    Fd::Internet(s) => {
+                                        s.borrow_mut().nonblock = args[2] & 0x800 != 0;
+                                        0
+                                    }
                                     Fd::Socket(s) => {
                                         s.nonblock.set(args[2] & 0x800 != 0);
                                         0
@@ -1120,6 +1263,29 @@ pub(super) fn run(
                                                 total += length;
                                             }
                                             total
+                                        }
+                                    }
+                                }
+                                Some(Fd::Internet(endpoint)) => {
+                                    let result = internet::vectored(
+                                        &mut process.memory.borrow_mut(),
+                                        &endpoint.borrow(),
+                                        args[1],
+                                        args[2],
+                                        true,
+                                    )?;
+                                    match result {
+                                        None => {
+                                            process.pending = Some((number, args));
+                                            event = Event::Blocked;
+                                            break;
+                                        }
+                                        Some(result) => {
+                                            if result == errno(32) {
+                                                process.pending_signals |= 1 << 12;
+                                                process.signal_senders[12] = process.group;
+                                            }
+                                            result
                                         }
                                     }
                                 }
@@ -2005,6 +2171,7 @@ pub(super) fn run(
                             child.futex_syscall = None;
                             child.pending = None;
                             child.poll_deadline = None;
+                            child.sleep_deadline = None;
                             child.vfork_wait = None;
                             child.vfork_parent = if vfork { Some(pid) } else { None };
                             if vfork {
@@ -2052,6 +2219,8 @@ pub(super) fn run(
                                 child.descriptor_flags = Rc::new(RefCell::new(
                                     process.descriptor_flags.borrow().clone(),
                                 ));
+                                child.real_timer =
+                                    Rc::new(RefCell::new(time::RealTimer::default()));
                                 child.group = child_pid;
                                 child.parent = process.group;
                             }
@@ -2293,7 +2462,8 @@ pub(super) fn run(
                                 .is_err()
                             {
                                 errno(14)
-                            } else if count == 0 && !matches!(&fd, Fd::Socket(_)) {
+                            } else if count == 0 && !matches!(&fd, Fd::Socket(_) | Fd::Internet(_))
+                            {
                                 0
                             } else {
                                 match (nr, &fd) {
@@ -2329,6 +2499,30 @@ pub(super) fn run(
                                         }
                                     }
                                     (0, Fd::Directory(_)) => errno(21),
+                                    (_, Fd::Internet(endpoint)) => {
+                                        let result = internet::transfer(
+                                            &mut process.memory.borrow_mut(),
+                                            &endpoint.borrow(),
+                                            args[1],
+                                            args[2],
+                                            nr == 1,
+                                            0,
+                                        )?;
+                                        match result {
+                                            None => {
+                                                process.pending = Some((number, args));
+                                                event = Event::Blocked;
+                                                break;
+                                            }
+                                            Some(result) => {
+                                                if result == errno(32) {
+                                                    process.pending_signals |= 1 << 12;
+                                                    process.signal_senders[12] = process.group;
+                                                }
+                                                result
+                                            }
+                                        }
+                                    }
                                     (_, Fd::Socket(endpoint)) => {
                                         let result = socket::transfer(
                                             &mut process.memory.borrow_mut(),
@@ -2683,9 +2877,14 @@ fn deliver_signal(process: &mut Process) -> Result<Option<i32>> {
         if action.handler == 0 || signal == 9 {
             return Ok(Some(signal as i32));
         }
-        let blocked = process
-            .pending
-            .take()
+        let pending = process.pending.take();
+        let interrupted_result =
+            if let Some((number, args)) = pending.filter(|(n, _)| matches!(n, 35 | 230)) {
+                time::interrupt_sleep(process, number, args)
+            } else {
+                errno(4)
+            };
+        let blocked = pending
             .map(|(number, _)| number)
             .or(process.futex_syscall.take());
         process.poll_deadline = None;
@@ -2694,12 +2893,12 @@ fn deliver_signal(process: &mut Process) -> Result<Option<i32>> {
             Engine::X86(cpu) => {
                 if let Some(number) = blocked {
                     if action.flags & 0x10000000 != 0
-                        && matches!(number, 0 | 1 | 19 | 20 | 40 | 44 | 45 | 61 | 73 | 202)
+                        && matches!(number, 0 | 1 | 19 | 20 | 40 | 42 | 44 | 45 | 61 | 73 | 202)
                     {
                         cpu.rip = cpu.rip.wrapping_sub(2);
                         cpu.regs[0] = number;
                     } else {
-                        cpu.set_result(errno(4));
+                        cpu.set_result(interrupted_result);
                     }
                 }
                 if cpu
@@ -2964,6 +3163,7 @@ fn poll_events(fd: Option<&Fd>, wanted: u16) -> u16 {
             let p = p.borrow();
             (if p.bytes.len() < 65536 { 4 | 256 } else { 0 }) | if p.readers == 0 { 8 } else { 0 }
         }
+        Some(Fd::Internet(s)) => internet::events(&s.borrow()),
         Some(Fd::Socket(s)) => socket::events(s),
         Some(Fd::UnixSocket { .. }) => 4 | 16 | 256,
         Some(Fd::Stdin) => 1 | 64,

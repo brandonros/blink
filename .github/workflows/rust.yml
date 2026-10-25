@@ -33,6 +33,7 @@ jobs:
           python3 rust/asm-regressions.py
           python3 rust/differential.py --rust-native-only
           python3 rust/float-regressions.py
+          python3 rust/tcp-smoke.py
       - uses: actions/upload-artifact@v4
         if: always() && runner.os == 'Linux'
         with:
@@ -40,6 +41,7 @@ jobs:
           path: |
             target/original-asm/results.json
             target/differential/results.json
+            target/tcp-smoke/results.json
             target/float-regressions/float-x86_64
             target/float-regressions/native.bin
             target/float-regressions/results.json

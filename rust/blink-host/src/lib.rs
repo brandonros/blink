@@ -1,5 +1,6 @@
 //! Host operations kept separate from guest ABI layouts.
 pub mod metadata;
+pub mod net;
 use std::{
     collections::VecDeque,
     fs, io,
@@ -378,6 +379,21 @@ pub fn flock(file: &fs::File, operation: u64) -> io::Result<()> {
         _ => return Err(io::ErrorKind::InvalidInput.into()),
     };
     Ok(rustix::fs::flock(file, operation)?)
+}
+
+/// Host wall/monotonic clocks, translated into portable seconds/nanoseconds.
+pub fn clock(realtime: bool, resolution: bool) -> (i64, u32) {
+    let id = if realtime {
+        rustix::time::ClockId::Realtime
+    } else {
+        rustix::time::ClockId::Monotonic
+    };
+    let time = if resolution {
+        rustix::time::clock_getres(id)
+    } else {
+        rustix::time::clock_gettime(id)
+    };
+    (time.tv_sec, time.tv_nsec as u32)
 }
 
 #[cfg(test)]

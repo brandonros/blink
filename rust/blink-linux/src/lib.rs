@@ -68,7 +68,16 @@ pub struct VirtualOpen {
     pub read: bool,
     pub write: bool,
 }
+pub struct InternetSocket {
+    pub host: blink_host::net::Tcp,
+    pub inode: u64,
+    pub nonblock: bool,
+    pub connecting: bool,
+    pub connected: bool,
+    pub ipv6: bool,
+}
 pub enum Fd {
+    Internet(Rc<RefCell<InternetSocket>>),
     Socket(Rc<Socket>),
     Virtual(Rc<RefCell<VirtualOpen>>),
     Directory(Rc<RefCell<blink_host::Directory>>),
@@ -93,6 +102,7 @@ impl Clone for Fd {
     fn clone(&self) -> Self {
         match self {
             Self::Socket(s) => Self::Socket(s.clone()),
+            Self::Internet(s) => Self::Internet(s.clone()),
             Self::Virtual(v) => Self::Virtual(v.clone()),
             Self::Directory(d) => Self::Directory(d.clone()),
             Self::UnixSocket { inode, nonblock } => Self::UnixSocket {
@@ -165,6 +175,16 @@ pub fn errno(error: &std::io::Error) -> u64 {
         ReadOnlyFilesystem => 30,
         Interrupted => 4,
         WouldBlock => 11,
+        BrokenPipe => 32,
+        NotConnected => 107,
+        ConnectionRefused => 111,
+        ConnectionReset => 104,
+        ConnectionAborted => 103,
+        TimedOut => 110,
+        AddrInUse => 98,
+        AddrNotAvailable => 99,
+        NetworkUnreachable => 101,
+        HostUnreachable => 113,
         Unsupported => 38,
         _ => 5,
     };
@@ -195,6 +215,7 @@ impl Fd {
                 dev: 0xffff_ff00,
                 ino: match self {
                     Self::Socket(s) => s.inode,
+                    Self::Internet(s) => s.borrow().inode,
                     Self::UnixSocket { inode, .. } => *inode,
                     Self::Stdin => 1,
                     Self::Stdout => 2,
@@ -203,7 +224,10 @@ impl Fd {
                     _ => unreachable!(),
                 },
                 nlink: 1,
-                mode: if matches!(self, Self::UnixSocket { .. } | Self::Socket(_)) {
+                mode: if matches!(
+                    self,
+                    Self::UnixSocket { .. } | Self::Socket(_) | Self::Internet(_)
+                ) {
                     0o140600
                 } else {
                     0o010600

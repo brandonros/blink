@@ -80,7 +80,8 @@ Implemented slices:
   support read/write, readv/writev, send/recv, sendfile, half-close, poll, peek,
   nonblocking flags shared across duplicates, and close-on-exec. Their bounded
   queues and endpoint lifetimes are guest-owned; no host socket is opened.
-  Pathname bind/listen/accept, ancillary data, and Internet sockets remain.
+  Pathname bind/listen/accept and ancillary data remain. Opt-in TCP support is
+  described below; UDP and guest DNS remain.
 - Bounded capture, timeout/cancellation (including blocked pipes/futexes), and
   explicit exit/signal/timeout/cancel/budget outcomes separate from engine errors.
 
@@ -112,7 +113,7 @@ This harness reads their original Dockerfiles, retains a disposable root between
 steps, and checks expected output. It does not assemble/export an OCI image or
 replace the 26 agent-platform checkpoint receipts.
 Broad ISA/SIMD/FPU coverage, shared file mappings, remaining directory-relative
-*at operations, broader VFS/procfs, networking, and JIT remain. ARM64 signal frames,
+*at operations, broader VFS/procfs, UDP/DNS, and JIT remain. ARM64 signal frames,
 threaded exec, signal altstacks, queued realtime signals, job control,
 automatic SIGCHLD notifications, and handlers for synchronous faults remain.
 No image-build checkpoint or verifier has passed with Rust.
@@ -190,7 +191,8 @@ The macOS job is a validation gate, not a claim that agent-platform builds pass.
 
 In the current cloud environment, Alpine's package CDN is absent from the
 configured network allowlist. Download/install coverage remains blocked there,
-in addition to the still-unimplemented guest Internet socket backend.
+independently of the opt-in guest TCP backend. A newly published environment
+configuration has not yet appeared in this running instance's active policy.
 
 ## Floating-point interpreter
 
@@ -224,3 +226,31 @@ and fchdir. `chroot` supports reselecting the existing configured root (as used 
 APK install scripts); changing to another guest root remains unsupported. Open
 directory handles still carry a stored path, so rename/unlink semantics remain
 incomplete. No host chroot is performed.
+
+## TCP and clocks
+
+`RuntimeConfig.network = true` / CLI `--network` permits guest IPv4/IPv6 TCP
+connections through safe Rustix host handles. All host sockets remain nonblocking;
+blocking guest connect/read/write waits replay through the cooperative scheduler.
+Descriptor duplication/fork share the socket and status flags, close-on-exec is
+per descriptor, and all handles close with their last owner. Supported operations
+include connect, read/write/readv/writev, send/recv, poll, shutdown, socket names,
+SO_ERROR, TCP_NODELAY and SO_KEEPALIVE. Unsupported socket options fail explicitly.
+UDP, bind/listen/accept, sendmsg/recvmsg, ancillary data, and guest DNS remain.
+Network permission does not bypass host routing or environment network policy.
+
+`tcp-smoke.py` compares a loopback client natively and under Rust, including
+blocking/nonblocking connects, split responses, half-close, fork/descriptor
+lifetime, and a runtime timeout while waiting for the host peer. A real Alpine
+BusyBox wget also downloaded Debian's 1,198-byte README over HTTP through this
+cloud environment's configured proxy. HTTPS and remote APK downloads are not
+established by that HTTP check. Guest proxy variables must be supplied explicitly;
+the runtime does not automatically inherit host environment or credentials.
+
+Guest real interval timers/alarm generate guest SIGALRM, are cleared in forked
+children, and remain through exec. Threads share their process timer; pending
+standard signals coalesce. Wall/monotonic clock queries use host clock adapters.
+Nanosleep and absolute/relative clock_nanosleep cooperate with scheduling and
+write remaining time on interruption. Virtual/profiling CPU timers and other
+clock IDs remain unsupported. The native comparison suite now has 14 compiled
+fixtures, including real-timer delivery, fork inheritance, and interrupted sleep.

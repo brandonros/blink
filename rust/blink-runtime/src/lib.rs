@@ -23,6 +23,8 @@ pub struct RuntimeConfig {
     pub trace: bool,
     /// Persist guest owner/mode attributes without changing host ownership.
     pub rootless_metadata: bool,
+    /// Allow guest TCP connections through nonblocking host sockets.
+    pub network: bool,
 }
 impl RuntimeConfig {
     pub fn new(rootfs: impl Into<PathBuf>, guest_arch: GuestArch) -> Self {
@@ -34,6 +36,7 @@ impl RuntimeConfig {
             max_instructions: 100_000_000,
             trace: false,
             rootless_metadata: false,
+            network: false,
         }
     }
 }

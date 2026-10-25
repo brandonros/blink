@@ -1,6 +1,6 @@
 use blink::{Blink, Command, GuestArch, RuntimeConfig, Termination};
 use std::{path::PathBuf, time::Duration};
-const USAGE:&str="usage: blink-cli [--root ROOT] [--cwd DIR] [--uid UID] [--gid GID] [--env KEY=VALUE] [--rootless-metadata] [--trace] [--arch x86_64|aarch64] [--timeout-ms N] [--max-instructions N] [--] PROGRAM [ARGS...]";
+const USAGE:&str="usage: blink-cli [--root ROOT] [--cwd DIR] [--uid UID] [--gid GID] [--env KEY=VALUE] [--rootless-metadata] [--network] [--trace] [--arch x86_64|aarch64] [--timeout-ms N] [--max-instructions N] [--] PROGRAM [ARGS...]";
 fn main() {
     match run() {
         Ok(code) => std::process::exit(code),
@@ -23,6 +23,7 @@ fn run() -> blink::Result<i32> {
     let mut budget = None;
     let mut trace = false;
     let mut rootless_metadata = false;
+    let mut network = false;
     let program = loop {
         match args.next().as_deref() {
             Some("--help" | "-h") => {
@@ -31,6 +32,7 @@ fn run() -> blink::Result<i32> {
             }
             Some("--trace") => trace = true,
             Some("--rootless-metadata") => rootless_metadata = true,
+            Some("--network") => network = true,
             Some("--root") => {
                 root = args.next().ok_or_else(usage)?;
                 root_set = true;
@@ -91,6 +93,7 @@ fn run() -> blink::Result<i32> {
     let mut config = RuntimeConfig::new(root, arch);
     config.trace = trace;
     config.rootless_metadata = rootless_metadata;
+    config.network = network;
     if let Some(b) = budget {
         config.max_instructions = b;
     }
