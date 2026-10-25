@@ -32,6 +32,7 @@ jobs:
         run: |
           python3 rust/asm-regressions.py
           python3 rust/differential.py --rust-native-only
+          python3 rust/float-regressions.py
       - uses: actions/upload-artifact@v4
         if: always() && runner.os == 'Linux'
         with:
@@ -39,3 +40,22 @@ jobs:
           path: |
             target/original-asm/results.json
             target/differential/results.json
+            target/float-regressions/float-x86_64
+            target/float-regressions/native.bin
+            target/float-regressions/results.json
+
+  replay-amd64-on-apple-silicon:
+    needs: runtime
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: rust-linux-comparisons
+          path: target/oracle
+      - name: Replay Linux AMD64 floating-point fixture on Darwin arm64
+        run: |
+          uname -sm
+          cargo run --release --locked -p blink-cli -- target/oracle/float-regressions/float-x86_64 > target/oracle/actual.bin
+          cmp target/oracle/float-regressions/native.bin target/oracle/actual.bin

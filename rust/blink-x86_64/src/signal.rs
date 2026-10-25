@@ -50,7 +50,8 @@ impl X86 {
         put(&mut frame, INFO + 16, sender as u64);
         put(&mut frame, UC + 224, sp + 440);
         frame[440..442].copy_from_slice(&0x37fu16.to_le_bytes());
-        frame[464..468].copy_from_slice(&0x1f80u32.to_le_bytes());
+        frame[464..468].copy_from_slice(&self.mxcsr.to_le_bytes());
+        frame[468..472].copy_from_slice(&0xffffu32.to_le_bytes());
         for n in 0..16 {
             frame[600 + n * 16..616 + n * 16].copy_from_slice(&self.xmm[n]);
         }
@@ -61,6 +62,7 @@ impl X86 {
         self.regs[2] = sp + UC as u64;
         self.rip = handler;
         self.flags &= !1024;
+        self.mxcsr = 0x1f80;
         Ok(())
     }
     pub fn restore_signal(&mut self, memory: &Memory) -> Result<u64> {
@@ -75,7 +77,14 @@ impl X86 {
         }
         let pointer = get(UC + 224);
         let mut xmm = [[0; 16]; 16];
+        let mut mxcsr = 0x1f80;
         if pointer != 0 {
+            mxcsr = memory.load(pointer.checked_add(24).ok_or(Error::ResourceLimit)?, 4)? as u32;
+            if mxcsr & !0xffff != 0 {
+                return Err(Error::InvalidConfig(
+                    "reserved MXCSR bits in signal context".into(),
+                ));
+            }
             for (n, slot) in xmm.iter_mut().enumerate() {
                 memory.read(
                     pointer
@@ -87,6 +96,7 @@ impl X86 {
             }
         }
         self.xmm = xmm;
+        self.mxcsr = mxcsr;
         for (n, index) in ORDER.iter().enumerate() {
             self.regs[*index] = get(UC + 40 + n * 8);
         }

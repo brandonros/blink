@@ -13,3 +13,4 @@ blink-core = { path = "../blink-core" }
 
 yaxpeax-x86 = { version = "=2.2.0", default-features = false, features = ["std"] }
 yaxpeax-arch = { version = "=0.3.3", default-features = false, features = ["std"] }
+rustc_apfloat = "=0.2.3"

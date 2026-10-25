@@ -1,5 +1,6 @@
 //! AMD64 integer interpreter with a bounded decoder adapter.
 mod decode;
+mod float;
 mod signal;
 use blink_core::{Cpu, Error, Memory, Result, Step};
 use decode::Value;
@@ -11,6 +12,7 @@ pub struct X86 {
     pub flags: u64,
     pub fs_base: u64,
     pub xmm: [[u8; 16]; 16],
+    pub mxcsr: u32,
     pub ticks: u64,
 }
 fn mask(w: usize) -> u64 {
@@ -31,6 +33,7 @@ impl X86 {
             flags: 2,
             fs_base: 0,
             xmm: [[0; 16]; 16],
+            mxcsr: 0x1f80,
             ticks: 0,
         };
         c.regs[4] = stack;
@@ -225,6 +228,9 @@ impl Cpu for X86 {
             None
         };
         self.rip = next;
+        if self.float(m, op, a, b, c, pc)? {
+            return Ok(Step::Continue);
+        }
         match op {
             Op::MOVHPS | Op::MOVHPD | Op::MOVLPS | Op::MOVLPD | Op::MOVHLPS | Op::MOVLHPS => {
                 let dst = a.ok_or_else(bad)?;
@@ -1153,11 +1159,15 @@ mod vector_tests {
         assert_eq!(c.xmm[0][..8], [0xbb; 8]);
         assert_eq!(c.xmm[0][8..], [0xaa; 8]);
         let before = c.xmm;
+        c.mxcsr = 0x5fa0;
         c.enter_signal(&mut m, 10, 0x1000, 0x1010, 0, 1).unwrap();
+        assert_eq!(c.mxcsr, 0x1f80);
+        c.mxcsr = 0x3f80;
         c.xmm = [[0; 16]; 16];
         c.regs[4] += 8;
         c.restore_signal(&m).unwrap();
         assert_eq!(c.xmm, before);
+        assert_eq!(c.mxcsr, 0x5fa0);
     }
     #[test]
     fn fs_negative_displacement_is_sign_extended() {

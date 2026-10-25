@@ -7,9 +7,13 @@ static long call(long n,long a,long b,long c,long d) {
 }
 #define CHECK(x) do { if(!(x)) { call(231,__LINE__,0,0,0); __builtin_unreachable(); } } while(0)
 static volatile int handled;
+static volatile unsigned handler_mxcsr;
 static int acknowledgement, restart_mode;
 static void handler(int signal) {
     if(signal==10) {
+        __asm__ volatile("stmxcsr %0":"=m"(handler_mxcsr));
+        unsigned changed=0x3f80;
+        __asm__ volatile("ldmxcsr %0"::"m"(changed));
         handled++;
         if(restart_mode) call(1,acknowledgement,(long)"a",1,0);
     }
@@ -23,6 +27,8 @@ __attribute__((noreturn)) void _start(void) {
         struct {void (*handler)(int); unsigned long flags; void (*restore)(void); unsigned long mask;} action={handler,0x4000000ul | (restart ? 0x10000000ul : 0),restore,0};
         CHECK(call(13,10,(long)&action,0,8)==0);
         int pipe[2]; CHECK(call(22,(long)pipe,0,0,0)==0);
+        unsigned original=0x5f80;
+        __asm__ volatile("ldmxcsr %0"::"m"(original));
         long parent=call(39,0,0,0,0);
         long child=call(57,0,0,0,0); CHECK(child>=0);
         if(child==0) {
@@ -50,6 +56,9 @@ __attribute__((noreturn)) void _start(void) {
             result=call(0,pipe[0],(long)&value,1,0);
         }
         CHECK(result==1 && value=='x' && handled>=1);
+        unsigned restored;
+        __asm__ volatile("stmxcsr %0":"=m"(restored));
+        CHECK(handler_mxcsr==0x1f80 && restored==original);
         int status=-1; CHECK(call(61,child,(long)&status,0,0)==child && status==0);
         CHECK(call(3,pipe[0],0,0,0)==0 && call(3,pipe[1],0,0,0)==0);
         CHECK(call(3,control[0],0,0,0)==0 && call(3,control[1],0,0,0)==0);

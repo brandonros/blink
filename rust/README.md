@@ -126,11 +126,12 @@ an open directory is not fully supported. Virtual proc files expose a small
 explicit subset and snapshot exec inputs; they are not complete Linux procfs.
 File close uses Rust's Drop and does not yet surface late host close errors.
 Non-UTF8 exec/path strings and overlapping ELF segment pages are not implemented.
-GitHub Actions at `30dad286b0412700838adf8a7d39fd200e08fe12` passed the Rust
-workspace tests, formatting, and Clippy on Darwin arm64 (macos-14). Full builder
-workloads have not yet been validated on macOS. Linux CI exposed native fixture
-assumptions about directory order and signal timing; those tests now enumerate
-names independent of order and acknowledge signal progress through a pipe.
+GitHub Actions at `9d080d5f06a094cb2af297db88c880ed74a3a78e` passed workspace
+tests, formatting, and Clippy on Darwin arm64 and Linux AMD64, plus the assembly
+and 13 compiled native comparisons on Linux. Full builder workloads have not yet
+been validated on macOS. Directory enumeration tests do not assume host ordering;
+signal restart tests acknowledge progress through a pipe rather than guessing a
+host-speed delay.
 
 ## Decoder evaluation
 
@@ -185,3 +186,25 @@ The macOS job is a validation gate, not a claim that agent-platform builds pass.
 In the current cloud environment, Alpine's package CDN is absent from the
 configured network allowlist. Download/install coverage remains blocked there,
 in addition to the still-unimplemented guest Internet socket backend.
+
+## Floating-point interpreter
+
+SSE scalar and packed single/double add, subtract, multiply, divide, minimum,
+maximum, comparisons, scalar integer conversions, and single/double conversions
+use pinned `rustc_apfloat` 0.2.3+llvm-462a31f5a5ab (Apache-2.0 WITH LLVM-exception).
+Arithmetic is software Rust, with no host floating-point mode changes or C
+fallback. MXCSR rounding, DAZ/FTZ, sticky exception bits, masked results, and
+unmasked arithmetic faults are explicit guest state. Signal frames save/restore
+MXCSR and handlers start with the default control word. Synchronous fault
+handlers remain unsupported; an unmasked SIMD fault terminates the guest.
+
+`python3 rust/float-regressions.py` compares result bits and MXCSR against native
+Linux AMD64 for 312,800 scalar records, covering exceptional values, four rounding
+modes, DAZ/FTZ combinations, and deterministic random inputs. Unit tests cover
+packed exceptions and page-end scalar reads. The adapter accounts for x86 NaN
+priority and directed-overflow flags: APFloat's saturation-to-maximum path reports
+only INEXACT, so a same-precision widened-exponent calculation detects overflow.
+These checks do not establish complete SSE2, x87, transcendental, or FPU coverage.
+CPUID remains conservative. CI also replays the native-generated AMD64 fixture
+and golden records on Apple Silicon; its status must be checked before claiming
+that cross-host comparison passed.
