@@ -38,6 +38,9 @@ __attribute__((noreturn)) void _start(void) {
         expected=bit<0||bit>=16?16:15-(unsigned)bit;
         fail |= result!=(0x123456789abc0000ul|expected) || (flags&65)!=((expected==16?1:0)|(expected==0?64:0));
     }
+    u64 streamed=0;
+    __asm__ volatile("movnti %1,%0; sfence":"=m"(streamed):"r"(x):"memory");
+    fail |= streamed!=x;
     char hex[33];
     for(int i=0;i<16;i++) {unsigned n=(x>>(i*4))&15;hex[i]="0123456789abcdef"[n];}
     for(int i=0;i<16;i++) {unsigned n=(y>>(i*4))&15;hex[i+16]="0123456789abcdef"[n];}

@@ -328,7 +328,7 @@ CPUID deliberately does not yet advertise that incomplete feature group. CLI `--
 expose existing runtime limits for this 130 MB executable.
 
 Startup exercises word/dword packed shifts, saturating packing, lane shuffles,
-and packed logical operations. `packed-regressions.py` compares 9,728 complete
+and packed logical operations. `packed-regressions.py` compares 24,576 complete
 native register/flag records; CI also replays them on Apple Silicon. Guest capget
 supports version negotiation and guest PID queries. Its read-only model derives
 effective/permitted capabilities from guest root IDs; it never exposes host
@@ -366,3 +366,12 @@ The native suite checks these semantics and TZCNT/LZCNT results plus defined
 CF/ZF flags at all operand widths. Lifecycle tests cancel blocked epoll, eventfd
 and pipe waits, then reuse the same runtime. The pinned Node version gate has
 passed on Linux AMD64 and Darwin arm64 CI; JavaScript execution remains unproven.
+
+
+Packed SIMD coverage includes multiply-high/low, unsigned dword multiplication,
+signed multiply-add with wrapping overflow, byte absolute-difference sums,
+rounded averages, saturated addition/subtraction, word min/max, lane insertion
+and extraction, sign-bit masks, unpacking and non-temporal stores. The 24,576
+native records compare full result registers and preserved flags. Memory tests
+cover aligned-only operand faults and a two-byte PINSRW at a page boundary.
+This still does not establish full SSE2/MMX coverage or enable their CPUID bits.

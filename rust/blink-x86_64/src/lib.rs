@@ -232,6 +232,25 @@ impl Cpu for X86 {
         } else {
             None
         };
+        // Legacy 128-bit SSE memory operands require 16-byte alignment except
+        // the explicitly unaligned moves. Scalar and 64-bit operands do not.
+        if [a, b, c]
+            .into_iter()
+            .flatten()
+            .any(|v| matches!(v, Value::Vector(_)))
+            && !matches!(op, Op::MOVUPS | Op::MOVUPD | Op::MOVDQU)
+        {
+            for value in [a, b, c].into_iter().flatten() {
+                if let Value::Memory { address, width: 16 } = value {
+                    if address & 15 != 0 {
+                        return Err(Error::MemoryFault {
+                            address,
+                            access: blink_core::Access::Read,
+                        });
+                    }
+                }
+            }
+        }
         self.rip = next;
         if matches!(op, Op::FXSAVE | Op::FXRSTOR) {
             let Value::Memory { address, .. } = a.ok_or_else(bad)? else {
@@ -277,7 +296,10 @@ impl Cpu for X86 {
             | Op::MOVAPD
             | Op::MOVUPD
             | Op::MOVSS
-            | Op::MOVSD => {
+            | Op::MOVSD
+            | Op::MOVNTDQ
+            | Op::MOVNTPS
+            | Op::MOVNTPD => {
                 let dst = a.ok_or_else(bad)?;
                 let src = b.ok_or_else(bad)?;
                 if matches!(op, Op::MOVDQA | Op::MOVAPS | Op::MOVAPD) {
@@ -567,7 +589,7 @@ impl Cpu for X86 {
                     ],
                 });
             }
-            Op::MOV | Op::MOVZX => {
+            Op::MOV | Op::MOVZX | Op::MOVNTI => {
                 let v = self.read(m, b.ok_or_else(bad)?)?;
                 self.write(m, a.ok_or_else(bad)?, v)?;
             }
@@ -1260,5 +1282,55 @@ mod byte_swap_tests {
         assert_eq!(cpu.regs[6], 0x78563412);
         cpu.step(&mut memory).unwrap();
         assert_eq!(cpu.regs[2], 0x8877665544332211);
+    }
+}
+
+#[cfg(test)]
+mod sse_memory_tests {
+    use super::*;
+    use blink_core::{Access, Permissions};
+    fn run(code: &[u8], address: u64) -> (X86, Memory) {
+        let mut memory = Memory::new(8192);
+        memory.map(4096, 4096, Permissions::RX).unwrap();
+        memory.map(8192, 4096, Permissions::RW).unwrap();
+        memory.initialize(4096, code).unwrap();
+        let mut cpu = X86::new(4096, 0);
+        cpu.regs[0] = address;
+        cpu.xmm[0] = [0x5a; 16];
+        (cpu, memory)
+    }
+    #[test]
+    fn insert_word_reads_only_two_bytes_at_page_end() {
+        let (mut cpu, mut memory) = run(&[0x66, 0x0f, 0xc4, 0x00, 7], 12286);
+        memory.store(12286, 0x1234, 2).unwrap();
+        cpu.step(&mut memory).unwrap();
+        assert_eq!(&cpu.xmm[0][..14], &[0x5a; 14]);
+        assert_eq!(&cpu.xmm[0][14..], &[0x34, 0x12]);
+    }
+    #[test]
+    fn legacy_packed_memory_alignment_and_atomic_faults() {
+        // PADDB and MOVNTDQ require alignment, while MOVDQU accepts the same pointer.
+        for code in [&[0x66, 0x0f, 0xfc, 0x00][..], &[0x66, 0x0f, 0xe7, 0x00][..]] {
+            let (mut cpu, mut memory) = run(code, 8193);
+            assert!(matches!(
+                cpu.step(&mut memory),
+                Err(Error::MemoryFault { address: 8193, .. })
+            ));
+            assert_eq!(cpu.xmm[0], [0x5a; 16]);
+            assert_eq!(memory.load(8193, 8).unwrap(), 0);
+        }
+        let (mut cpu, mut memory) = run(&[0xf3, 0x0f, 0x6f, 0x00], 8193);
+        memory.write(8193, &[0x12; 16]).unwrap();
+        cpu.step(&mut memory).unwrap();
+        assert_eq!(cpu.xmm[0], [0x12; 16]);
+        let (mut cpu, mut memory) = run(&[0x66, 0x0f, 0xfc, 0x00], 12288);
+        assert!(matches!(
+            cpu.step(&mut memory),
+            Err(Error::MemoryFault {
+                access: Access::Read,
+                ..
+            })
+        ));
+        assert_eq!(cpu.xmm[0], [0x5a; 16]);
     }
 }
