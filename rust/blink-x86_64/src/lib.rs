@@ -4,6 +4,7 @@ mod float;
 mod signal;
 use blink_core::{Cpu, Error, Memory, Result, Step};
 use decode::Value;
+pub use signal::{SignalContext, SignalStack};
 use yaxpeax_x86::long_mode::{ConditionCode as C, Opcode as Op};
 #[derive(Clone)]
 pub struct X86 {

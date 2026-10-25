@@ -114,7 +114,7 @@ steps, and checks expected output. It does not assemble/export an OCI image or
 replace the 26 agent-platform checkpoint receipts.
 Broad ISA/SIMD/FPU coverage, shared file mappings, remaining directory-relative
 *at operations, broader VFS/procfs, UDP/DNS, and JIT remain. ARM64 signal frames,
-threaded exec, signal altstacks, queued realtime signals, job control,
+threaded exec, queued realtime signals, job control,
 automatic SIGCHLD notifications, and handlers for synchronous faults remain.
 No image-build checkpoint or verifier has passed with Rust.
 
@@ -172,7 +172,7 @@ The preexisting C executable, config, clean-build log and hash manifest are in
 `/workspace/work/blink-baseline`. The clean reference build uses the separate
 `o/rust-reference` directory. On this Linux x86_64 host, Rust, C interpreter and
 native Linux agree on the original fixtures, filesystem/sendfile, and signal
-restart. All 14 fixtures pass Rust/native. C differs on vfork memory sharing and
+restart. All 15 fixtures pass Rust/native. C differs on vfork memory sharing and
 returns extra F_GETFL flags on a CLOEXEC pipe in the descriptor fixture. C JIT fails the pipe/fork
 fixture and crashes during the exec fixture, including after a clean rebuild.
 Those failures remain visible; C is a comparison target, not an infallible oracle.
@@ -258,7 +258,15 @@ children, and remain through exec. Threads share their process timer; pending
 standard signals coalesce. Wall/monotonic clock queries use host clock adapters.
 Nanosleep and absolute/relative clock_nanosleep cooperate with scheduling and
 write remaining time on interruption. Virtual/profiling CPU timers and other
-clock IDs remain unsupported. The native comparison suite now has 14 compiled
+clock IDs remain unsupported. The native comparison suite now has 15 compiled
 fixtures, including real-timer delivery, fork inheritance, and interrupted sleep.
 
 Packed conversion memory operands are checked at their architectural width: CVTDQ2PD and CVTPS2PD read eight bytes, even though the decoder reports a 16-byte vector width. Page-boundary and unmasked-exception tests guard source accesses and whole-destination preservation.
+
+AMD64 alternate signal stacks support sigaltstack, SA_ONSTACK, nested handlers,
+and SS_AUTODISARM. The guest ucontext saves/restores the stack configuration;
+fork inherits it, thread clone disables it, and exec resets its address/size.
+The native comparison checks stack placement, mutation rejection while active,
+autodisarm/restoration and fork/exec inheritance. No host signal stack changes.
+The current Alpine workload and 435,200-record floating-point gates passed on
+both Linux AMD64 and Darwin arm64 at commit 8cde89c.

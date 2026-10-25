@@ -18,6 +18,46 @@ use blink_core::{Access, Error, Memory, Result};
 const ORDER: [usize; 16] = [8, 9, 10, 11, 12, 13, 14, 15, 7, 6, 5, 3, 2, 0, 1, 4];
 const UC: usize = 8;
 const INFO: usize = 312;
+#[derive(Clone, Copy, Debug)]
+pub struct SignalStack {
+    pub pointer: u64,
+    pub size: u64,
+    pub flags: u32,
+}
+impl Default for SignalStack {
+    fn default() -> Self {
+        Self {
+            pointer: 0,
+            size: 0,
+            flags: 2,
+        }
+    }
+}
+impl SignalStack {
+    pub fn contains(self, sp: u64) -> bool {
+        self.flags & 2 == 0 && sp > self.pointer && sp.wrapping_sub(self.pointer) <= self.size
+    }
+    pub fn status(self, sp: u64) -> u32 {
+        if self.flags & 2 != 0 {
+            self.flags | 2
+        } else if self.flags & 0x80000000 != 0 {
+            0x80000000
+        } else if self.contains(sp) {
+            1
+        } else {
+            0
+        }
+    }
+}
+pub struct SignalContext {
+    pub signal: u32,
+    pub handler: u64,
+    pub restorer: u64,
+    pub mask: u64,
+    pub sender: u32,
+    pub stack: SignalStack,
+    pub use_stack: bool,
+}
 impl X86 {
     /// Linux rt_sigframe header: restorer, ucontext, siginfo. Legacy FP area preserves the implemented XMM registers; x87 remains unsupported.
     pub fn enter_signal(
@@ -29,15 +69,54 @@ impl X86 {
         mask: u64,
         sender: u32,
     ) -> Result<()> {
-        let sp = (self.regs[4].checked_sub(128).ok_or(Error::ResourceLimit)? & !15)
-            .checked_sub(952)
-            .ok_or(Error::ResourceLimit)?;
+        self.enter_signal_context(
+            memory,
+            SignalContext {
+                signal,
+                handler,
+                restorer,
+                mask,
+                sender,
+                stack: SignalStack::default(),
+                use_stack: false,
+            },
+        )
+    }
+    pub fn enter_signal_context(
+        &mut self,
+        memory: &mut Memory,
+        context: SignalContext,
+    ) -> Result<()> {
+        let SignalContext {
+            signal,
+            handler,
+            restorer,
+            mask,
+            sender,
+            stack,
+            use_stack,
+        } = context;
+        let switching = use_stack && stack.flags & 2 == 0 && stack.status(self.regs[4]) != 1;
+        let top = if switching {
+            stack
+                .pointer
+                .checked_add(stack.size)
+                .ok_or(Error::ResourceLimit)?
+        } else {
+            self.regs[4].checked_sub(128).ok_or(Error::ResourceLimit)?
+        };
+        let sp = (top & !15).checked_sub(952).ok_or(Error::ResourceLimit)?;
+        if (switching || stack.contains(self.regs[4])) && !stack.contains(sp) {
+            return Err(Error::ResourceLimit);
+        }
         let mut frame = [0u8; 952];
         fn put(frame: &mut [u8], off: usize, value: u64) {
             frame[off..off + 8].copy_from_slice(&value.to_le_bytes());
         }
         put(&mut frame, 0, restorer);
-        put(&mut frame, UC + 24, 2);
+        put(&mut frame, UC + 16, stack.pointer);
+        put(&mut frame, UC + 24, stack.flags as u64);
+        put(&mut frame, UC + 32, stack.size);
         for (n, index) in ORDER.iter().enumerate() {
             put(&mut frame, UC + 40 + n * 8, self.regs[*index]);
         }
@@ -66,6 +145,9 @@ impl X86 {
         Ok(())
     }
     pub fn restore_signal(&mut self, memory: &Memory) -> Result<u64> {
+        self.restore_signal_context(memory).map(|(mask, _)| mask)
+    }
+    pub fn restore_signal_context(&mut self, memory: &Memory) -> Result<(u64, SignalStack)> {
         let sp = self.regs[4].checked_sub(8).ok_or(Error::ResourceLimit)?;
         let mut frame = [0u8; 440];
         memory.read(sp, &mut frame, Access::Read)?;
@@ -102,6 +184,13 @@ impl X86 {
         }
         self.rip = get(UC + 168);
         self.flags = (get(UC + 176) & 0xcd5) | 2;
-        Ok(get(UC + 296))
+        Ok((
+            get(UC + 296),
+            SignalStack {
+                pointer: get(UC + 16),
+                flags: get(UC + 24) as u32,
+                size: get(UC + 32),
+            },
+        ))
     }
 }

@@ -1,5 +1,6 @@
 //! Cooperative guest processes. No host fork, host signals, or blocking guest pipes.
 mod internet;
+mod signals;
 mod socket;
 mod time;
 mod virtual_fs;
@@ -79,6 +80,7 @@ struct Process {
     robust_head: u64,
     actions: Rc<RefCell<[SignalAction; 64]>>,
     signal_mask: u64,
+    signal_stack: blink_x86_64::SignalStack,
     pending_signals: u64,
     signal_senders: [u32; 64],
     futex: Option<u64>,
@@ -258,6 +260,7 @@ pub(super) fn run(
             robust_head: 0,
             actions: Rc::new(RefCell::new([SignalAction::default(); 64])),
             signal_mask: 0,
+            signal_stack: blink_x86_64::SignalStack::default(),
             pending_signals: 0,
             signal_senders: [0; 64],
             futex: None,
@@ -1649,6 +1652,7 @@ pub(super) fn run(
                             }
                         }
                     }
+                    131 => signals::sigaltstack(&mut process, args)?,
                     13 => {
                         let signal = args[0];
                         if signal == 0 || signal > 64 || signal == 9 || signal == 19 || args[3] != 8
@@ -1682,7 +1686,12 @@ pub(super) fn run(
                                 None => errno(14),
                                 Some(new) => {
                                     if new.flags
-                                        & !(4 | 0x4000000 | 0x10000000 | 0x40000000 | 0x80000000)
+                                        & !(4
+                                            | 0x4000000
+                                            | 0x8000000
+                                            | 0x10000000
+                                            | 0x40000000
+                                            | 0x80000000)
                                         != 0
                                     {
                                         return Err(Error::UnsupportedSyscall(number));
@@ -1750,11 +1759,16 @@ pub(super) fn run(
                     }
                     15 => {
                         let restored = match &mut process.cpu {
-                            Engine::X86(c) => c.restore_signal(&process.memory.borrow()),
+                            Engine::X86(c) => c.restore_signal_context(&process.memory.borrow()),
                             _ => return Err(Error::UnsupportedSyscall(number)),
                         };
                         match restored {
-                            Ok(mask) => process.signal_mask = mask & !UNBLOCKABLE,
+                            Ok((mask, stack)) => {
+                                process.signal_mask = mask & !UNBLOCKABLE;
+                                if let Ok(stack) = signals::validated_stack(stack) {
+                                    process.signal_stack = stack;
+                                }
+                            }
                             Err(_) => {
                                 event = Event::Signal(11);
                                 break;
@@ -2178,6 +2192,7 @@ pub(super) fn run(
                                 process.vfork_wait = Some(child_pid);
                             }
                             if thread {
+                                child.signal_stack = blink_x86_64::SignalStack::default();
                                 child.cpu.stack(args[1]);
                                 if flags & 0x80000 != 0 {
                                     child.cpu.tls(if config.guest_arch == GuestArch::X86_64 {
@@ -2337,6 +2352,11 @@ pub(super) fn run(
                                             process.executable = new.executable;
                                             process.argv = new.argv;
                                             process.env = env.clone();
+                                            process.signal_stack = blink_x86_64::SignalStack {
+                                                flags: (process.signal_stack.flags & 0x80000000)
+                                                    | 2,
+                                                ..Default::default()
+                                            };
                                             process.robust_head = 0;
                                             process.clear_tid = 0;
                                             process.heap =
@@ -2902,17 +2922,24 @@ fn deliver_signal(process: &mut Process) -> Result<Option<i32>> {
                     }
                 }
                 if cpu
-                    .enter_signal(
+                    .enter_signal_context(
                         &mut process.memory.borrow_mut(),
-                        signal as u32,
-                        action.handler,
-                        action.restorer,
-                        process.signal_mask,
-                        process.signal_senders[n],
+                        blink_x86_64::SignalContext {
+                            signal: signal as u32,
+                            handler: action.handler,
+                            restorer: action.restorer,
+                            mask: process.signal_mask,
+                            sender: process.signal_senders[n],
+                            stack: process.signal_stack,
+                            use_stack: action.flags & 0x8000000 != 0,
+                        },
                     )
                     .is_err()
                 {
                     return Ok(Some(11));
+                }
+                if process.signal_stack.flags & 0x80000000 != 0 {
+                    process.signal_stack = blink_x86_64::SignalStack::default();
                 }
             }
             _ => return Err(Error::UnsupportedSyscall(134)),
