@@ -173,7 +173,7 @@ The preexisting C executable, config, clean-build log and hash manifest are in
 `o/rust-reference` directory. On this Linux x86_64 host, Rust, C interpreter and
 native Linux comparisons retain per-fixture results. The expanded filesystem,
 MXCSR restart, socketpair and alternate-stack cases expose additional C baseline
-differences; consult the report rather than treating the C runtime as the oracle. All 16 fixtures pass Rust/native. C differs on vfork memory sharing and
+differences; consult the report rather than treating the C runtime as the oracle. All 17 fixtures pass Rust/native. C differs on vfork memory sharing and
 returns extra F_GETFL flags on a CLOEXEC pipe in the descriptor fixture. C JIT fails the pipe/fork
 fixture and crashes during the exec fixture, including after a clean rebuild.
 Those failures remain visible; C is a comparison target, not an infallible oracle.
@@ -259,7 +259,7 @@ children, and remain through exec. Threads share their process timer; pending
 standard signals coalesce. Wall/monotonic clock queries use host clock adapters.
 Nanosleep and absolute/relative clock_nanosleep cooperate with scheduling and
 write remaining time on interruption. Virtual/profiling CPU timers and other
-clock IDs remain unsupported. The native comparison suite now has 16 compiled
+clock IDs remain unsupported. The native comparison suite now has 17 compiled
 fixtures, including real-timer delivery, fork inheritance, and interrupted sleep.
 
 Packed conversion memory operands are checked at their architectural width: CVTDQ2PD and CVTPS2PD read eight bytes, even though the decoder reports a 16-byte vector width. Page-boundary and unmasked-exception tests guard source accesses and whole-destination preservation.
@@ -298,7 +298,7 @@ x87 NaN priority and the APFloat directed-overflow flag difference. CI replays
 this native-generated fixture on Apple Silicon as well as the SSE fixture.
 
 This is partial x87 support. Transcendentals, square root,
-environment/save-state instructions and complete
+legacy environment/save-state instructions and complete
 unsupported-encoding behavior remain; unsupported operations fail explicitly.
 CPUID still does not advertise complete FPU/SSE2 support. No Node/Bun workload or
 new agent-platform checkpoint is established by these instruction tests.
@@ -308,3 +308,9 @@ exponent range. Discarded bits are retained through round-to-odd before final
 rounding, avoiding double rounding at a midpoint plus a very small term. Native
 fixtures include those cases and rounding-dependent signed zero after exact
 cancellation. The 64-bit precision path retains direct extended arithmetic.
+
+FXSAVE/FXRSTOR support the legacy and REX.W formats, x87 stack/tag/control state,
+all 16 XMM registers, MXCSR validation, 16-byte alignment faults and preservation
+of the software-owned tail. The native fixture checks restoration and fault
+behavior. The runtime records the last x87 instruction/opcode/data address;
+processor-specific pointer reporting is not compared byte-for-byte by this gate.

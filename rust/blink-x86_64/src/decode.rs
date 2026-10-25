@@ -208,12 +208,17 @@ pub(super) fn operand(
         // These packed conversions read two 32-bit elements, not m128.
         // yaxpeax 2.2.0 reports the destination vector width for memory operands.
         8
+    } else if matches!(
+        i.opcode(),
+        yaxpeax_x86::long_mode::Opcode::FXSAVE | yaxpeax_x86::long_mode::Opcode::FXRSTOR
+    ) {
+        512
     } else if lea {
         8
     } else {
         i.mem_size().and_then(|s| s.bytes_size()).ok_or_else(bad)? as usize
     };
-    if !matches!(width, 1 | 2 | 4 | 8 | 10 | 16) {
+    if !matches!(width, 1 | 2 | 4 | 8 | 10 | 16 | 512) {
         return Err(bad());
     }
     Ok(Value::Memory {

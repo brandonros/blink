@@ -85,6 +85,9 @@ pub(crate) struct Fpu {
     pub top: usize,
     pub control: u16,
     pub status: u16,
+    pub opcode: u16,
+    pub instruction: u64,
+    pub data: u64,
 }
 impl Default for Fpu {
     fn default() -> Self {
@@ -94,6 +97,9 @@ impl Default for Fpu {
             top: 0,
             control: 0x37f,
             status: 0,
+            opcode: 0,
+            instruction: 0,
+            data: 0,
         }
     }
 }
@@ -296,6 +302,25 @@ impl X86 {
             && self.fpu.status & !self.fpu.control & 63 != 0
         {
             return Err(Error::ArithmeticFault);
+        }
+        if !matches!(
+            op,
+            Op::FNINIT | Op::FNCLEX | Op::FNSTCW | Op::FNSTSW | Op::FLDCW | Op::WAIT
+        ) {
+            self.fpu.instruction = pc;
+            for offset in 0..14 {
+                let byte = memory.fetch(pc.wrapping_add(offset))?;
+                if (0xd8..=0xdf).contains(&byte) {
+                    self.fpu.opcode = ((byte as u16 & 7) << 8)
+                        | memory.fetch(pc.wrapping_add(offset + 1))? as u16;
+                    break;
+                }
+            }
+            if let Some(Value::Memory { address, .. }) =
+                a.filter(|v| matches!(v, Value::Memory { .. })).or(b)
+            {
+                self.fpu.data = address;
+            }
         }
         match op {
             Op::FNINIT => self.fpu = Fpu::default(),
@@ -621,6 +646,9 @@ impl Fpu {
     pub fn save_legacy(&self, bytes: &mut [u8]) {
         bytes[..2].copy_from_slice(&self.control.to_le_bytes());
         bytes[2..4].copy_from_slice(&self.status().to_le_bytes());
+        bytes[6..8].copy_from_slice(&self.opcode.to_le_bytes());
+        bytes[8..16].copy_from_slice(&self.instruction.to_le_bytes());
+        bytes[16..24].copy_from_slice(&self.data.to_le_bytes());
         bytes[4] = self
             .occupied
             .iter()
@@ -639,6 +667,9 @@ impl Fpu {
             control,
             status,
             top,
+            opcode: u16::from_le_bytes(bytes[6..8].try_into().unwrap()) & 0x7ff,
+            instruction: u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+            data: u64::from_le_bytes(bytes[16..24].try_into().unwrap()),
             ..Self::default()
         };
         for n in 0..8 {
@@ -648,6 +679,58 @@ impl Fpu {
             state.values[(top + n) & 7] = u128::from_le_bytes(value);
         }
         state
+    }
+}
+
+impl X86 {
+    pub(super) fn fxstate(
+        &mut self,
+        memory: &mut Memory,
+        address: u64,
+        restore: bool,
+        wide: bool,
+    ) -> Result<()> {
+        let access = if restore {
+            blink_core::Access::Read
+        } else {
+            blink_core::Access::Write
+        };
+        if address & 15 != 0 {
+            return Err(Error::MemoryFault { address, access });
+        }
+        memory.check(address, 512, access)?;
+        let mut bytes = [0; 512];
+        if restore {
+            memory.read(address, &mut bytes, access)?;
+            let mxcsr = u32::from_le_bytes(bytes[24..28].try_into().unwrap());
+            if mxcsr & !0xffff != 0 {
+                return Err(Error::MemoryFault { address, access });
+            }
+            if !wide {
+                bytes[12..16].fill(0);
+                bytes[20..24].fill(0);
+            }
+            let fpu = Fpu::restore_legacy(&bytes);
+            for n in 0..16 {
+                self.xmm[n].copy_from_slice(&bytes[160 + n * 16..176 + n * 16]);
+            }
+            self.mxcsr = mxcsr;
+            self.fpu = fpu;
+        } else {
+            self.fpu.save_legacy(&mut bytes);
+            if !wide {
+                bytes[12..16].fill(0);
+                bytes[20..24].fill(0);
+            }
+            bytes[24..28].copy_from_slice(&self.mxcsr.to_le_bytes());
+            bytes[28..32].copy_from_slice(&0xffffu32.to_le_bytes());
+            for n in 0..16 {
+                bytes[160 + n * 16..176 + n * 16].copy_from_slice(&self.xmm[n]);
+            }
+            // The software-owned tail is not modified by FXSAVE.
+            memory.write(address, &bytes[..416])?;
+        }
+        Ok(())
     }
 }
 
@@ -683,7 +766,7 @@ mod tests {
     }
     #[test]
     fn unmasked_exception_is_deferred_and_preserves_stack() {
-        let (mut cpu, mut memory) = machine(&[]);
+        let (mut cpu, mut memory) = machine(&[0xd9, 0xe8]);
         cpu.fpu.set(0, 0);
         cpu.fpu.set(1, Extended::from_u128(1).value.to_bits());
         cpu.fpu.control &= !4;
@@ -723,7 +806,7 @@ mod tests {
     }
     #[test]
     fn signal_handler_starts_clean_and_return_restores_x87_stack() {
-        let (mut cpu, mut memory) = machine(&[]);
+        let (mut cpu, mut memory) = machine(&[0xd9, 0xe8]);
         cpu.fpu.control = 0x77f;
         cpu.fpu.push(Extended::from_i128(-123).value.to_bits(), 0);
         cpu.fpu.push(Extended::from_u128(456).value.to_bits(), 0);

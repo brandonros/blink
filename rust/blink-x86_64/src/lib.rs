@@ -232,6 +232,18 @@ impl Cpu for X86 {
             None
         };
         self.rip = next;
+        if matches!(op, Op::FXSAVE | Op::FXRSTOR) {
+            let Value::Memory { address, .. } = a.ok_or_else(bad)? else {
+                return Err(bad());
+            };
+            self.fxstate(
+                m,
+                address,
+                op == Op::FXRSTOR,
+                ins.prefixes.rex().is_some_and(|r| r.w()),
+            )?;
+            return Ok(Step::Continue);
+        }
         if self.x87(m, op, a, b, pc)? || self.float(m, op, a, b, c, pc)? {
             return Ok(Step::Continue);
         }
