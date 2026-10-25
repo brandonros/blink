@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+    "rust/blink-core",
+    "rust/blink-host",
+    "rust/blink-linux",
+    "rust/blink-x86_64",
+    "rust/blink-aarch64",
+    "rust/blink-runtime",
+    "rust/blink",
+    "rust/blink-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "ISC"
+rust-version = "1.82"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

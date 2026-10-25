@@ -1,0 +1,12 @@
+[package]
+name = "blink-x86_64"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+blink-core = { path = "../blink-core" }
