@@ -64,5 +64,18 @@ __attribute__((noreturn)) void _start(void) {
         OPERATE80("fsqrt");
         if(call(1,1,(long)&r,sizeof r)!=sizeof r) {call(231,1,0,0);__builtin_unreachable();}
     }
+    for(unsigned mode=0;mode<12;mode++) for(unsigned op=0;op<5;op++) {
+        struct extended left={0,0},right={0,0};
+        struct record r={0};r.op=23+op;
+        r.control=0x7f|((mode<4?0:mode<8?2:3)<<8)|((mode&3)<<10);
+        switch(op){case 0:OPERATE80("fldl2t");break;case 1:OPERATE80("fldl2e");break;case 2:OPERATE80("fldpi");break;case 3:OPERATE80("fldlg2");break;case 4:OPERATE80("fldln2");break;}
+        if(call(1,1,(long)&r,sizeof r)!=sizeof r) {call(231,1,0,0);__builtin_unreachable();}
+    }
+    for(unsigned sample=0;sample<21;sample++) for(unsigned empty=0;empty<2;empty++) {
+        struct extended left={0,0},right=sample<13?extended[sample]:special[sample-13];
+        struct record r={0};r.a=right.fraction;r.b=right.exponent;r.op=28+empty;r.control=0x37f;
+        if(empty){OPERATE80("ffree %%st(0); fxam");}else{OPERATE80("fxam");}
+        if(call(1,1,(long)&r,sizeof r)!=sizeof r) {call(231,1,0,0);__builtin_unreachable();}
+    }
     call(231,0,0,0);__builtin_unreachable();
 }

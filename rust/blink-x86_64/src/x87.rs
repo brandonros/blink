@@ -323,6 +323,12 @@ impl X86 {
                 | Op::FLD
                 | Op::FILD
                 | Op::FLD1
+                | Op::FLDL2T
+                | Op::FLDL2E
+                | Op::FLDPI
+                | Op::FLDLG2
+                | Op::FLDLN2
+                | Op::FXAM
                 | Op::FLDZ
                 | Op::FST
                 | Op::FSTP
@@ -410,6 +416,52 @@ impl X86 {
                 let source = b.or(a).ok_or_else(bad)?;
                 let value = self.x87_read(memory, source, op == Op::FILD, &mut exceptions)?;
                 self.fpu.push(value, exceptions);
+            }
+            Op::FLDL2T | Op::FLDL2E | Op::FLDPI | Op::FLDLG2 | Op::FLDLN2 => {
+                // Extended constants rounded by RC, independently of PC. The
+                // architectural constant load never reports precision loss.
+                let (down, nearest_up): (u128, bool) = match op {
+                    Op::FLDL2T => (0x4000_d49a_784b_cd1b_8afe, false),
+                    Op::FLDL2E => (0x3fff_b8aa_3b29_5c17_f0bb, true),
+                    Op::FLDPI => (0x4000_c90f_daa2_2168_c234, true),
+                    Op::FLDLG2 => (0x3ffd_9a20_9a84_fbcf_f798, true),
+                    _ => (0x3ffe_b172_17f7_d1cf_79ab, true),
+                };
+                let up = match (self.fpu.control >> 10) & 3 {
+                    0 => nearest_up,
+                    2 => true,
+                    _ => false,
+                };
+                self.fpu.push(down + u128::from(up), 0);
+            }
+            Op::FXAM => {
+                let bits = self.fpu.values[self.fpu.top];
+                let fraction = bits as u64;
+                let exponent = (bits >> 64) & 0x7fff;
+                let class = if !self.fpu.occupied[self.fpu.top] {
+                    5
+                } else if exponent == 0 {
+                    if fraction == 0 {
+                        4
+                    } else {
+                        6
+                    }
+                } else if fraction & (1 << 63) == 0 {
+                    0
+                } else if exponent == 0x7fff {
+                    if fraction == 1 << 63 {
+                        3
+                    } else {
+                        1
+                    }
+                } else {
+                    2
+                };
+                self.fpu.status = (self.fpu.status & !0x4700)
+                    | ((class & 1) << 8)
+                    | ((class & 2) << 9)
+                    | ((class & 4) << 12)
+                    | (((bits >> 79) as u16 & 1) << 9);
             }
             Op::FLD1 | Op::FLDZ => self.fpu.push(
                 if op == Op::FLD1 {

@@ -290,7 +290,7 @@ loads/stores, and stack operations. Signal handlers start with a fresh x87 state
 sigreturn restores the saved stack and control word. An unmasked exception
 preserves the destination/stack and faults on the next waiting instruction.
 
-`python3 rust/x87-regressions.py` compares 151,296 native AMD64 result/status records,
+`python3 rust/x87-regressions.py` compares 151,398 native AMD64 result/status records,
 including 80-bit extrema, NaNs, denormals, all three precision controls, four rounding modes, comparisons and
 conversions. Tests also cover a ten-byte source at a page boundary, masked stack
 overflow, deferred faults, and signal-frame preservation. The adapter handles
@@ -480,7 +480,13 @@ ZF-only updates and CX16 alignment checks. CPUID advertises CX8/CX16 after
 native comparisons and fault-state tests; CI replays the fixture on Darwin arm64.
 
 FSQRT uses a 128-bit integer radicand and exact remainder, rounding directly
-to the selected 24/53/64-bit significand. The x87 oracle now compares 151,296
+to the selected 24/53/64-bit significand. The x87 oracle now compares 151,398
 records, including 49,248 extra square-root cases with extended-format edge
 encodings, exponent extremes, random significands and all rounding/precision
 controls. Empty-stack and deferred unmasked-invalid behavior have focused tests.
+
+The x87 constant loads honor rounding control without precision exceptions or
+precision-control truncation. FXAM classifies empty, zero, normal, denormal,
+infinite, NaN and unsupported encodings without arithmetic exceptions. Native
+comparisons cover all constant rounding/precision combinations and classification
+of occupied and empty slots.
