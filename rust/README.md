@@ -586,9 +586,10 @@ absolute error by 2^-62 * max(1, |x|), and tangent angular residual modulo pi by
 the same amount. This explicitly allows physical CPUs' limited pi reduction;
 it is not an ulp-accuracy claim for large angles or values near zeros/poles.
 
-At FPATAN(minimum-normal / 1), local Intel hardware and CI native hardware disagree
+At FPATAN(minimum-normal / 1) and FSIN/FSINCOS(minimum-normal), local Intel
+hardware and CI native hardware disagree
 on underflow status because the mathematical correction is far below extended
-precision. The gate permits only UE differences for that exact input boundary
+precision. The gate permits only UE differences for those exact input boundaries
 (and its signed/pseudo-denormal forms), retaining every occurrence in the report.
 All other exception comparisons remain strict. C1 and last-bit differences remain
 expected for approximate instructions, and full FPU support is still incomplete.

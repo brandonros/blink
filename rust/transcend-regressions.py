@@ -55,12 +55,13 @@ for index in range(len(native)//40):
     x, y = decode(a[:10]), decode(a[10:20])
     operation = struct.unpack('<H', a[34:36])[0]
     status_difference = (native_sw ^ rust_sw) & ~0x200
-    # At atan(min_normal/1), the mathematical correction is vastly below
+    # At atan(min_normal/1) and sin(min_normal), the correction is vastly below
     # extended precision. Local Intel and CI native CPUs disagree on UE:
     # one treats the approximation as normal, another detects tiny-before-round.
     # Permit only that flag at this exact boundary, and retain it in the report.
-    if (status_difference == 0x10 and operation == 0 and x == 1
-            and y is not None and abs(y) == mp.power(2, -16382)):
+    tiny_atan = operation == 0 and x == 1 and y is not None and abs(y) == mp.power(2, -16382)
+    tiny_sine = operation in (4, 7, 8) and x is not None and abs(x) == mp.power(2, -16382)
+    if status_difference == 0x10 and (tiny_atan or tiny_sine):
         underflow_boundary_differences.append(dict(record=index, native=hex(native_sw), rust=hex(rust_sw)))
     elif status_difference:
         errors.append(dict(record=index, reason='status', native=hex(native_sw), rust=hex(rust_sw)))
@@ -127,7 +128,8 @@ report = dict(records=len(native)//40, fixture_sha256=hashlib.sha256(fixture.rea
               last_bit_differences=last_bit_differences, underflow_boundary_differences=underflow_boundary_differences,
               max_reduction_bound_fraction={k:float(v) for k,v in max_reduction_fraction.items()}, max_error_ulps={k:float(v) for k,v in max_error.items()}, differences=errors)
 (output/'results.json').write_text(json.dumps(report, indent=2)+'\n')
-print(json.dumps({k:v for k,v in report.items() if k!='differences'}))
+print(json.dumps({**{k:v for k,v in report.items() if k not in ('differences', 'underflow_boundary_differences')},
+                  'underflow_boundary_differences':len(underflow_boundary_differences)}))
 if errors:
     print(json.dumps(errors[:5], indent=2))
 raise SystemExit(bool(errors))
