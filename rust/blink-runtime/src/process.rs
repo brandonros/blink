@@ -393,6 +393,8 @@ pub(super) fn run(
                         61 => 217,
                         17 => 79,
                         49 => 80,
+                        50 => 81,
+                        51 => 161,
                         34 => 258,
                         35 => 263,
                         36 => 266,
@@ -1836,6 +1838,34 @@ pub(super) fn run(
                                 1,
                             )?;
                             bytes.len() as u64 + 1
+                        }
+                    }
+                    81 if args[0] as i32 == -100 => errno(9),
+                    81 => match directory_cwd(config, &process, args[0] as i32, ".") {
+                        Ok(cwd) => {
+                            *process.cwd.borrow_mut() = cwd;
+                            0
+                        }
+                        Err(error) => error,
+                    },
+                    161 => {
+                        if process.credentials.euid != 0 {
+                            errno(1)
+                        } else {
+                            match cstring(&process.memory.borrow(), args[0]) {
+                                Err(_) => errno(14),
+                                Ok(path) => match blink_host::resolve_from(
+                                    &config.rootfs,
+                                    &process.cwd.borrow(),
+                                    std::path::Path::new(&path),
+                                    false,
+                                ) {
+                                    Err(error) => blink_linux::errno(&error),
+                                    Ok(path) if path == config.rootfs => 0,
+                                    Ok(path) if !path.is_dir() => errno(20),
+                                    _ => return Err(Error::UnsupportedSyscall(number)),
+                                },
+                            }
                         }
                     }
                     80 => {
@@ -3316,24 +3346,26 @@ fn change_owner(config: &RuntimeConfig, process: &Process, nr: u64, args: [u64; 
             Ok(p) => p,
             Err(_) => return Ok(errno(14)),
         };
-        if nr == 260 && (args[4] & !256 != 0 || (args[0] as i32 != -100 && !path.starts_with('/')))
-        {
-            return Err(Error::UnsupportedSyscall(nr));
+        if nr == 260 && args[4] & !256 != 0 {
+            return Ok(errno(22));
+        }
+        let cwd = match directory_cwd(
+            config,
+            process,
+            if nr == 260 { args[0] as i32 } else { -100 },
+            &path,
+        ) {
+            Ok(cwd) => cwd,
+            Err(error) => return Ok(error),
+        };
+        if let Some(fs) = virtual_fs::filesystem(&virtual_fs::path(&cwd, &path)) {
+            return Ok(errno(if fs.readonly { 30 } else { 1 }));
         }
         let nofollow = nr == 94 || (nr == 260 && args[4] & 256 != 0);
         let path = if nofollow {
-            blink_host::entry_path(
-                &config.rootfs,
-                &process.cwd.borrow(),
-                std::path::Path::new(&path),
-            )
+            blink_host::entry_path(&config.rootfs, &cwd, std::path::Path::new(&path))
         } else {
-            blink_host::resolve_from(
-                &config.rootfs,
-                &process.cwd.borrow(),
-                std::path::Path::new(&path),
-                false,
-            )
+            blink_host::resolve_from(&config.rootfs, &cwd, std::path::Path::new(&path), false)
         };
         match path {
             Ok(p) => blink_host::metadata::Target::Path(&p).chown(uid as u32, gid as u32, true),
@@ -3409,22 +3441,17 @@ fn change_times(config: &RuntimeConfig, process: &Process, args: [u64; 6]) -> Re
             Ok(p) => p,
             Err(_) => return Ok(errno(14)),
         };
-        if args[0] as i32 != -100 && !path.starts_with('/') {
-            return Err(Error::UnsupportedSyscall(280));
+        let cwd = match directory_cwd(config, process, args[0] as i32, &path) {
+            Ok(cwd) => cwd,
+            Err(error) => return Ok(error),
+        };
+        if let Some(fs) = virtual_fs::filesystem(&virtual_fs::path(&cwd, &path)) {
+            return Ok(errno(if fs.readonly { 30 } else { 1 }));
         }
         let path = if args[3] & 256 != 0 {
-            blink_host::entry_path(
-                &config.rootfs,
-                &process.cwd.borrow(),
-                std::path::Path::new(&path),
-            )
+            blink_host::entry_path(&config.rootfs, &cwd, std::path::Path::new(&path))
         } else {
-            blink_host::resolve_from(
-                &config.rootfs,
-                &process.cwd.borrow(),
-                std::path::Path::new(&path),
-                false,
-            )
+            blink_host::resolve_from(&config.rootfs, &cwd, std::path::Path::new(&path), false)
         };
         match path {
             Err(e) => Err(e),

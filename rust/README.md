@@ -95,9 +95,14 @@ Alpine 3.22.7 AMD64 musl/BusyBox passes four real shell cases: echo, a pipeline
 with external exec, file redirection/append, and command substitution. The smoke
 harness uses disposable root copies and also passes with the C interpreter.
 Static glibc hello passes; this host's dynamic glibc refuses the conservative
-CPUID capability set. APK version, installed-package listing, offline simulation, and a persisted
-world update for an already-installed package pass `apk-smoke.py`. The fixture
-uses no repositories or downloads and does not establish new-package installation.
+CPUID capability set. `apk-smoke.py` passes seven offline gates: version, installed-package listing,
+simulation, a persisted world update, installation of a newly constructed local
+APKv2 package, execution/metadata verification, and removal (including BusyBox's
+trigger). The package contains payload checksums and a post-install shell script;
+UID/GID 123:456, mode 0640, and mtime 1 survive into a subsequent guest invocation
+without changing host ownership. The unsigned fixture explicitly uses
+`--allow-untrusted --force-non-repository` in a disposable root without persistent
+APK cache. No repository package download or signature-trust gate is claimed.
 Node, Bun, and builder images are unproven.
 
 The six small builder examples `00-hello` through `05-environment` pass every
@@ -213,3 +218,9 @@ Square root uses a bounded integer restoring algorithm on at most 106 significan
 bits, including exact remainder-based rounding. No additional square-root
 dependency is linked. A further 100,000 deterministic single/double pairs compare
 nearest rounding with the host square-root operation in tests.
+
+APKv2 installation also exercises directory-relative ownership/timestamp updates
+and fchdir. `chroot` supports reselecting the existing configured root (as used by
+APK install scripts); changing to another guest root remains unsupported. Open
+directory handles still carry a stored path, so rename/unlink semantics remain
+incomplete. No host chroot is performed.

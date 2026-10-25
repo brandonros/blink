@@ -18,6 +18,12 @@ __attribute__((noreturn)) void _start(void) {
     CHECK(call(138,in,(long)fsinfo,0,0)==0 && fsinfo[0]!=0 && fsinfo[1]>0);
     long directory=call(2,(long)"fixture",0x10000,0,0);
     CHECK(directory>=0);
+    CHECK(call(81,-100,0,0,0)==-9 && call(81,in,0,0,0)==-20);
+    long previous=call(2,(long)".",0x10000,0,0); CHECK(previous>=0);
+    CHECK(call(81,directory,0,0,0)==0);
+    long childpath=call(2,(long)"source",0,0,0); CHECK(childpath>=0);
+    CHECK(call(3,childpath,0,0,0)==0);
+    CHECK(call(81,previous,0,0,0)==0 && call(3,previous,0,0,0)==0);
     long relative=call(257,directory,(long)"source",0,0);
     CHECK(relative>=0 && call(3,relative,0,0,0)==0);
     char entries[128];
