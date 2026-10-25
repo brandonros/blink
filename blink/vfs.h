@@ -58,6 +58,7 @@ struct VfsOps {
   int (*Access)(struct VfsInfo *, const char *, mode_t, int);
   int (*Stat)(struct VfsInfo *, const char *, struct stat *, int);
   int (*Fstat)(struct VfsInfo *, struct stat *);
+  int (*Gethostfd)(struct VfsInfo *);
   int (*Statfs)(struct VfsInfo *, HostStatfs *);
   int (*Fstatfs)(struct VfsInfo *, HostStatfs *);
   int (*Chmod)(struct VfsInfo *, const char *, mode_t, int);
@@ -190,6 +191,20 @@ extern struct VfsInfo *g_actualrootinfo;
 #define VFS_SYSTEM_CONTAINER(e) DLL_CONTAINER(struct VfsSystem, elem, (e))
 #define VFS_MOUNT_CONTAINER(e)  DLL_CONTAINER(struct VfsMount, elem, (e))
 #define VFS_DEVICE_CONTAINER(e) DLL_CONTAINER(struct VfsDevice, elem, (e))
+
+/* Hold a VFS reference while passing a native descriptor to a host API. */
+#if !defined(DISABLE_VFS)
+int VfsImportHostFd(int);
+int VfsAcquireHostFd(int, struct VfsInfo **);
+void VfsReleaseHostFd(struct VfsInfo *);
+#else
+static inline int VfsImportHostFd(int fd) { return fd; }
+static inline int VfsAcquireHostFd(int fd, struct VfsInfo **lease) {
+  *lease = 0;
+  return fd;
+}
+static inline void VfsReleaseHostFd(struct VfsInfo *lease) { (void)lease; }
+#endif
 
 #if !defined(DISABLE_VFS)
 int VfsChdir(const char *);

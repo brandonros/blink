@@ -56,6 +56,8 @@
 #include "blink/x86.h"
 #include "blink/xlat.h"
 
+bool g_trace_faults;
+_Thread_local u64 g_fault_host_pc;
 _Thread_local siginfo_t g_siginfo;
 _Thread_local struct Machine *g_machine;
 
@@ -2126,6 +2128,8 @@ nexgen32e_f GetOp(long op) {
       XLAT(0x321, OpInsertps);
       XLAT(0x322, OpPinsrdVdqEdqpIb);
       XLAT(0x344, OpSsePclmulqdq);
+      XLAT(0x340, OpDot);
+      XLAT(0x341, OpDot);
       XLAT(0x342, OpMpsadbw);
       XLAT(0x360, OpPcmpstr);
       XLAT(0x361, OpPcmpstr);
@@ -2229,7 +2233,16 @@ static void GeneralDispatch(P) {
 #endif
 }
 
+/* Dispatch boundaries: a compiled path can execute multiple guest instructions. */
 void ExecuteInstruction(struct Machine *m) {
+  if (g_trace_faults) {
+    unsigned n = m->fault_trace_next;
+    m->fault_trace[n].ip = m->ip;
+    m->fault_trace[n].sp = Read64(m->sp);
+    m->fault_trace[n].bp = Read64(m->bp);
+    m->fault_trace_next = (n + 1) % 64;
+    if (m->fault_trace_count < 64) ++m->fault_trace_count;
+  }
 #if LOG_CPU
   LogCpu(m);
 #endif
@@ -2326,4 +2339,22 @@ void HandleFatalSystemSignal(struct Machine *m, const siginfo_t *si) {
   m->faultaddr = ConvertHostToGuestAddress(m->system, si->si_addr, 0);
   sig = UnXlatSignal(si->si_signo);
   DeliverSignalToUser(m, sig, UnXlatSiCode(sig, si->si_code));
+}
+
+/* Called after unwinding the native signal handler, before guest crash handlers. */
+void DumpFaultTrace(struct Machine *m, int sig, int code) {
+  unsigned i, n;
+  if (!g_trace_faults) return;
+  LOGF("FAULTTRACE tid=%d signal=%d code=%d guest_ip=%#" PRIx64
+       " guest_fault=%#" PRIx64 " host_pc=%#" PRIx64 " flags=%#x",
+       m->tid, sig, code, m->ip, m->faultaddr, g_fault_host_pc, m->flags);
+  g_fault_host_pc = 0;
+  for (i = 0; i < 16; ++i)
+    LOGF("FAULTTRACE reg[%u]=%#" PRIx64, i, Read64(m->weg[i]));
+  for (i = 0; i < m->fault_trace_count; ++i) {
+    n = (m->fault_trace_next + 64 - m->fault_trace_count + i) % 64;
+    LOGF("FAULTTRACE dispatch[%u] ip=%#" PRIx64 " sp=%#" PRIx64
+         " bp=%#" PRIx64, i, m->fault_trace[n].ip,
+         m->fault_trace[n].sp, m->fault_trace[n].bp);
+  }
 }

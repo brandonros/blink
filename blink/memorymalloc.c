@@ -415,10 +415,13 @@ struct Machine *NewMachine(struct System *system, struct Machine *parent) {
     m->sysdepth = 0;
     m->sigdepth = 0;
     m->signals = 0;
+    memset(m->pending_signals, 0, sizeof(m->pending_signals));
   } else {
     memset(m, 0, sizeof(*m));
     ResetCpu(m);
   }
+  m->fault_trace_next = 0;
+  m->fault_trace_count = 0;
   m->ctid = 0;
   m->oplen = 0;
   m->system = system;

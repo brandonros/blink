@@ -36,6 +36,16 @@
 #include "blink/vfs.h"
 #include "blink/rootless.h"
 
+#ifdef BLINK_USE_EPOLL_SHIM
+#ifdef DISABLE_VFS
+#error "The epoll-shim backend currently requires --enable-vfs"
+#endif
+#include <epoll-shim/detail/common.h>
+#include <epoll-shim/detail/read.h>
+#include <epoll-shim/detail/write.h>
+#include <epoll-shim/detail/poll.h>
+#endif
+
 #ifndef DISABLE_VFS
 
 struct HostfsDevice {
@@ -189,7 +199,7 @@ int HostfsFreeDevice(void *device) {
 int HostfsCreateInfo(struct HostfsInfo **output) {
   *output = (struct HostfsInfo *)malloc(sizeof(struct HostfsInfo));
   if (!*output) {
-    return 0;
+    return enomem();
   }
   (*output)->mode = 0;
   (*output)->rootless_anon = NULL;
@@ -692,6 +702,12 @@ int HostfsStat(struct VfsInfo *parent, const char *name, struct stat *st,
     st->st_dev = parent->dev;
   }
   return ret;
+}
+
+static int HostfsGethostfd(struct VfsInfo *info) {
+  struct HostfsInfo *hostinfo = (struct HostfsInfo *)info->data;
+  if (hostinfo->filefd == -1) return ebadf();
+  return hostinfo->filefd;
 }
 
 /* Resolve current descriptor paths without relying on cached VFS names. */
@@ -2057,8 +2073,10 @@ cleananddie:
     unassert(!VfsFreeInfo(*output));
   } else if (hostinfo != NULL) {
     unassert(!HostfsFreeInfo(hostinfo));
-  } else if (dodup && fd != -1) {
-    unassert(!close(fd));
+  } else if (fd != -1) {
+    int err = errno;
+    close(fd);
+    errno = err;
   }
   return -1;
 }
@@ -2073,13 +2091,14 @@ struct VfsSystem g_hostfs = {.name = "hostfs",
                                  .Finddir = HostfsFinddir,
                                  .Traverse = HostfsTraverse,
                                  .Readlink = HostfsReadlink,
-                                 .Readfdlink = HostfsReadfdlink,
                                  .Mkdir = HostfsMkdir,
                                  .Mkfifo = HostfsMkfifo,
                                  .Open = HostfsOpen,
                                  .Access = HostfsAccess,
                                  .Stat = HostfsStat,
                                  .Fstat = HostfsFstat,
+                                 .Gethostfd = HostfsGethostfd,
+                                 .Readfdlink = HostfsReadfdlink,
                                  .Statfs = HostfsStatfs,
                                  .Fstatfs = HostfsFstatfs,
                                  .Chmod = HostfsChmod,

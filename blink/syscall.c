@@ -101,6 +101,10 @@
 #include <sched.h>
 #endif
 
+#ifdef HAVE_EVENTFD
+#include <sys/eventfd.h>
+#endif
+
 #ifdef HAVE_EPOLL_PWAIT1
 #include <sys/epoll.h>
 #endif
@@ -200,6 +204,61 @@ const struct FdCb kFdCbHost = {
     .tcgetwinsize = my_tcgetwinsize,
     .tcsetwinsize = my_tcsetwinsize,
 };
+
+#ifdef HAVE_EVENTFD
+static bool EventfdHasEightBytes(const struct iovec *iov, int n) {
+  size_t left = 8;
+  int i;
+  for (i = 0; i < n; ++i) {
+    if (iov[i].iov_len >= left) return true;
+    left -= iov[i].iov_len;
+  }
+  return false;
+}
+
+static ssize_t EventfdReadv(int fd, const struct iovec *iov, int n) {
+  u64 value;
+  u8 bytes[8];
+  size_t off = 0, count;
+  ssize_t rc;
+  int i;
+  if (!EventfdHasEightBytes(iov, n)) return einval();
+  if ((rc = VfsRead(fd, &value, 8)) != 8) return rc;
+  Write64(bytes, value);
+  for (i = 0; i < n && off < 8; ++i) {
+    count = MIN(iov[i].iov_len, 8 - off);
+    memcpy(iov[i].iov_base, bytes + off, count);
+    off += count;
+  }
+  return 8;
+}
+
+static ssize_t EventfdWritev(int fd, const struct iovec *iov, int n) {
+  u64 value;
+  u8 bytes[8];
+  size_t off = 0, count;
+  int i;
+  if (!EventfdHasEightBytes(iov, n)) return einval();
+  for (i = 0; i < n && off < 8; ++i) {
+    count = MIN(iov[i].iov_len, 8 - off);
+    memcpy(bytes + off, iov[i].iov_base, count);
+    off += count;
+  }
+  value = Read64(bytes);
+  return VfsWrite(fd, &value, 8);
+}
+
+static const struct FdCb kFdCbEventfd = {
+    .close = VfsClose,
+    .readv = EventfdReadv,
+    .writev = EventfdWritev,
+    .poll = VfsPoll,
+    .tcgetattr = VfsTcgetattr,
+    .tcsetattr = VfsTcsetattr,
+    .tcgetwinsize = my_tcgetwinsize,
+    .tcsetwinsize = my_tcsetwinsize,
+};
+#endif
 
 struct Fd *GetAndLockFd(struct Machine *m, int fildes) {
   struct Fd *fd;
@@ -2412,6 +2471,9 @@ static i64 SysRead(struct Machine *m, i32 fildes, i64 addr, u64 size) {
     FreeIovs(&iv);
   } else {
     rc = 0;
+#ifdef HAVE_EVENTFD
+    if (readv_impl == EventfdReadv) rc = einval();
+#endif
   }
   return rc;
 }
@@ -2444,6 +2506,9 @@ static i64 SysWrite(struct Machine *m, i32 fildes, i64 addr, u64 size) {
     FreeIovs(&iv);
   } else {
     rc = 0;
+#ifdef HAVE_EVENTFD
+    if (writev_impl == EventfdWritev) rc = einval();
+#endif
   }
   return HandleSigpipe(m, rc, 0);
 }
@@ -3846,8 +3911,24 @@ static ssize_t SysGetrandom(struct Machine *m, i64 a, size_t n, int f) {
 }
 
 void OnSignal(int sig, siginfo_t *si, void *uc) {
+  struct siginfo_linux info = {0};
+  int guest = UnXlatSignal(sig);
   SIG_LOGF("OnSignal(%s)", DescribeSignal(UnXlatSignal(sig)));
-  EnqueueSignal(g_machine, UnXlatSignal(sig));
+  Write32(info.signo, guest);
+  Write32(info.code, UnXlatSiCode(guest, si->si_code));
+  if (guest == SIGCHLD_LINUX || Read32(info.code) == SI_USER_LINUX ||
+      Read32(info.code) == (u32)SI_QUEUE_LINUX ||
+      Read32(info.code) == (u32)SI_TKILL_LINUX) {
+    Write32(info.pid, si->si_pid);
+    Write32(info.uid, si->si_uid);
+  }
+  if (guest == SIGCHLD_LINUX) {
+    Write32(info.status, Read32(info.code) == CLD_EXITED_LINUX
+                             ? si->si_status : UnXlatSignal(si->si_status));
+  } else if (Read32(info.code) == (u32)SI_QUEUE_LINUX) {
+    Write64(info.value, (uintptr_t)si->si_value.sival_ptr);
+  }
+  EnqueueSignalInfo(g_machine, guest, &info);
 }
 
 static int SysSigaction(struct Machine *m, int sig, i64 act, i64 old,
@@ -3911,7 +3992,7 @@ static int SysSigaction(struct Machine *m, int sig, i64 act, i64 old,
   if (act) {
     m->system->hands[sig - 1] = hand;
     if (isignored) {
-      m->signals &= ~((u64)1 << (sig - 1));
+      DequeueSignalInfo(m, sig, 0);
     }
     if ((syssig = XlatSignal(sig)) != -1 && !IsBlinkSig(m->system, sig)) {
       sigfillset(&syshand.sa_mask);
@@ -3922,7 +4003,11 @@ static int SysSigaction(struct Machine *m, int sig, i64 act, i64 old,
 #endif
       switch (handler) {
         case SIG_DFL_LINUX:
-          syshand.sa_handler = SIG_DFL;
+          if (m->sigmask & ((u64)1 << (sig - 1))) {
+            syshand.sa_sigaction = OnSignal;
+          } else {
+            syshand.sa_handler = SIG_DFL;
+          }
           break;
         case SIG_IGN_LINUX:
           syshand.sa_handler = SIG_IGN;
@@ -4133,6 +4218,66 @@ static int SysSigsuspend(struct Machine *m, i64 maskaddr, i64 sigsetsize) {
 #else
   return SigsuspendActual(m, Read64(word));
 #endif
+}
+
+/* Uses the existing pending-signal bitset; real-time queuing remains unsupported. */
+static int SysSigtimedwait(struct Machine *m, i64 setaddr, i64 infoaddr,
+                            i64 timeoutaddr, u64 sigsetsize) {
+  int rc, sig;
+  u8 word[8];
+  u64 wanted, pending, oldmask;
+  struct timespec_linux timeout;
+  struct siginfo_linux info;
+  struct timespec duration, now, deadline, delay;
+  if (sigsetsize != 8) return einval();
+  if (infoaddr && !IsValidMemory(m, infoaddr, sizeof(info), PROT_WRITE)) return -1;
+  if (CopyFromUserRead(m, word, setaddr, sizeof(word)) == -1) return -1;
+  wanted = Read64(word) & ~((u64)1 << (SIGKILL_LINUX - 1) |
+                             (u64)1 << (SIGSTOP_LINUX - 1));
+  deadline = GetMaxTime();
+  if (timeoutaddr) {
+    if (CopyFromUserRead(m, &timeout, timeoutaddr, sizeof(timeout)) == -1)
+      return -1;
+    duration.tv_sec = Read64(timeout.sec);
+    duration.tv_nsec = Read64(timeout.nsec);
+    if (duration.tv_sec < 0 || duration.tv_nsec < 0 ||
+        duration.tv_nsec >= 1000000000)
+      return einval();
+    deadline = AddTime(GetMonotonic(), duration);
+  }
+  oldmask = m->sigmask;
+  m->sigmask |= wanted;
+  for (;;) {
+    if ((pending = m->signals & wanted)) {
+      sig = bsf(pending) + 1;
+      unassert(DequeueSignalInfo(m, sig, &info));
+      rc = infoaddr && CopyToUserWrite(m, infoaddr, &info, sizeof(info)) == -1
+               ? -1 : sig;
+      break;
+    }
+    if (CheckInterrupt(m, false)) {
+      rc = -1;
+      break;
+    }
+    now = GetMonotonic();
+    if (CompareTime(now, deadline) >= 0) {
+      rc = eagain();
+      break;
+    }
+    // Host sigtimedwait is unavailable on macOS. A bounded sleep also observes
+    // guest signals queued by another emulated thread without a host signal.
+    delay = FromMilliseconds(10);
+    if (CompareTime(SubtractTime(deadline, now), delay) < 0)
+      delay = SubtractTime(deadline, now);
+    if (nanosleep(&delay, 0) == -1 && errno != EINTR) {
+      rc = -1;
+      break;
+    }
+  }
+  m->sigmask = oldmask;
+  if (m->signals & ~m->sigmask)
+    atomic_store_explicit(&m->attention, true, memory_order_release);
+  return rc;
 }
 
 static int SysSigaltstack(struct Machine *m, i64 newaddr, i64 oldaddr) {
@@ -4934,7 +5079,8 @@ static int SysSigprocmask(struct Machine *m, int how, i64 setaddr,
     }
   }
   if (setaddr) {
-    set = Read64(neu);
+    set = Read64(neu) & ~((u64)1 << (SIGKILL_LINUX - 1) |
+                             (u64)1 << (SIGSTOP_LINUX - 1));
     if (how == SIG_BLOCK_LINUX) {
       m->sigmask |= set;
     } else if (how == SIG_UNBLOCK_LINUX) {
@@ -4944,6 +5090,32 @@ static int SysSigprocmask(struct Machine *m, int how, i64 setaddr,
     } else {
       __builtin_unreachable();
     }
+    /* Guest masks normally don't block host delivery: OnSignal queues it for
+       the emulator. Default-disposition signals need that handler too, or a
+       masked SIGUSR1 kills the host before the guest can wait for it. */
+    LOCK(&m->system->sig_lock);
+    for (sig = 1; sig <= 64; ++sig) {
+      struct sigaction action;
+      int host;
+      if (!(m->sigmask & ((u64)1 << (sig - 1))) ||
+          Read64(m->system->hands[sig - 1].handler) != SIG_DFL_LINUX ||
+          IsBlinkSig(m->system, sig) ||
+          sig == SIGKILL_LINUX || sig == SIGSTOP_LINUX ||
+          sig == SIGTSTP_LINUX || sig == SIGTTIN_LINUX ||
+          sig == SIGTTOU_LINUX || sig == SIGCONT_LINUX ||
+          (host = XlatSignal(sig)) == -1) continue;
+      memset(&action, 0, sizeof(action));
+      sigfillset(&action.sa_mask);
+      action.sa_flags = SA_SIGINFO;
+      action.sa_sigaction = OnSignal;
+      if (sigaction(host, &action, 0)) {
+        int err = errno;
+        UNLOCK(&m->system->sig_lock);
+        errno = err;
+        return -1;
+      }
+    }
+    UNLOCK(&m->system->sig_lock);
     XlatLinuxToSigset(&ss, m->sigmask & ((u64)1 << (SIGTSTP_LINUX - 1) |
                                          (u64)1 << (SIGTTIN_LINUX - 1) |
                                          (u64)1 << (SIGTTOU_LINUX - 1)));
@@ -4977,11 +5149,16 @@ static int SysTkill(struct Machine *m, int tid, int sig) {
 #if defined(HAVE_FORK) || defined(HAVE_THREADS)
   bool found;
   int rc, err;
+  struct siginfo_linux info = {0};
   if (tid < 0) return einval();
   if (!(0 <= sig && sig <= 64)) {
     LOGF("tkill(%d, %d) failed due to bogus signal", tid, sig);
     return einval();
   }
+  Write32(info.signo, sig);
+  Write32(info.code, SI_TKILL_LINUX);
+  Write32(info.pid, m->system->pid);
+  Write32(info.uid, getuid());
   // trigger signal immediately if possible
   if (tid == m->tid) {
     if (sig == SIGSTOP_LINUX || sig == SIGKILL_LINUX) {
@@ -5009,7 +5186,7 @@ static int SysTkill(struct Machine *m, int tid, int sig) {
       UNLOCK(&m->system->sig_lock);
       return rc;
     } else {
-      m->signals |= (u64)1 << (sig - 1);
+      EnqueueSignalInfo(m, sig, &info);
       return 0;
     }
   }
@@ -5029,7 +5206,7 @@ static int SysTkill(struct Machine *m, int tid, int sig) {
       m2 = MACHINE_CONTAINER(e);
       if (m2->tid == tid) {
         if (sig) {
-          EnqueueSignal(m2, sig);
+          EnqueueSignalInfo(m2, sig, &info);
           err = pthread_kill(m2->thread, SIGSYS);
         } else {
           err = pthread_kill(m2->thread, 0);
@@ -5437,6 +5614,31 @@ static int SysPipe(struct Machine *m, i64 pipefds_addr) {
   return SysPipe2(m, pipefds_addr, 0);
 }
 
+#ifdef HAVE_EVENTFD
+static i32 SysEventfd2(struct Machine *m, u32 initial, i32 flags) {
+  int fd, lim, hostflags = 0, oflags = O_RDWR;
+  struct Fd *meta;
+  if (flags & ~(EFD_SEMAPHORE_LINUX | EFD_CLOEXEC_LINUX | EFD_NONBLOCK_LINUX))
+    return einval();
+  if (flags & EFD_SEMAPHORE_LINUX) hostflags |= EFD_SEMAPHORE;
+  if (flags & EFD_CLOEXEC_LINUX) { hostflags |= EFD_CLOEXEC; oflags |= O_CLOEXEC; }
+  if (flags & EFD_NONBLOCK_LINUX) { hostflags |= EFD_NONBLOCK; oflags |= O_NONBLOCK; }
+  if (!(lim = GetFileDescriptorLimit(m->system))) return emfile();
+  if ((fd = eventfd(initial, hostflags)) == -1) return -1;
+  if ((fd = VfsImportHostFd(fd)) == -1) return -1;
+  if (fd >= lim) { VfsClose(fd); return emfile(); }
+  LOCK(&m->system->fds.lock);
+  unassert((meta = AddFd(&m->system->fds, fd, oflags)));
+  meta->cb = &kFdCbEventfd;
+  UNLOCK(&m->system->fds.lock);
+  return fd;
+}
+
+static i32 SysEventfd(struct Machine *m, u32 initial) {
+  return SysEventfd2(m, initial, 0);
+}
+#endif
+
 #ifdef HAVE_EPOLL_PWAIT1
 
 static i32 SysEpollCreate1(struct Machine *m, i32 flags) {
@@ -5453,9 +5655,10 @@ static i32 SysEpollCreate1(struct Machine *m, i32 flags) {
     return einval();
   }
   if (!(lim = GetFileDescriptorLimit(m->system))) return emfile();
-  if ((fildes = epoll_create1(sysflags)) != -1) {
+  if ((fildes = epoll_create1(sysflags)) == -1) return -1;
+  if ((fildes = VfsImportHostFd(fildes)) != -1) {
     if (fildes >= lim) {
-      close(fildes);
+      VfsClose(fildes);
       fildes = emfile();
     } else {
       LOCK(&m->system->fds.lock);
@@ -5492,13 +5695,25 @@ static i32 SysEpollCtl(struct Machine *m, i32 epfd, i32 op, i32 fd,
     default:
       return einval();
   }
-  return epoll_ctl(epfd, op, fd, pepe);
+  struct VfsInfo *ep_lease, *fd_lease;
+  int hostep, hostfd, rc;
+  if ((hostep = VfsAcquireHostFd(epfd, &ep_lease)) == -1) return -1;
+  if ((hostfd = VfsAcquireHostFd(fd, &fd_lease)) == -1) {
+    VfsReleaseHostFd(ep_lease);
+    return -1;
+  }
+  rc = epoll_ctl(hostep, op, hostfd, pepe);
+  VfsReleaseHostFd(fd_lease);
+  VfsReleaseHostFd(ep_lease);
+  return rc;
 }
 
 static i32 EpollPwait(struct Machine *m, i32 epfd, i64 eventsaddr,
                       i32 maxevents, struct timespec deadline, i64 sigmaskaddr,
                       u64 sigsetsize) {
   i32 i, rc;
+  int hostep;
+  struct VfsInfo *ep_lease;
   u64 oldmask_guest = 0;
   sigset_t block, oldmask;
   struct epoll_event *events;
@@ -5522,6 +5737,7 @@ static i32 EpollPwait(struct Machine *m, i32 epfd, i64 eventsaddr,
             m, calloc(maxevents, sizeof(struct epoll_event_linux))))) {
     return -1;
   }
+  if ((hostep = VfsAcquireHostFd(epfd, &ep_lease)) == -1) return -1;
   unassert(!sigfillset(&block));
   unassert(!pthread_sigmask(SIG_BLOCK, &block, &oldmask));
   if (sigmaskp_guest) {
@@ -5538,9 +5754,9 @@ static i32 EpollPwait(struct Machine *m, i32 epfd, i64 eventsaddr,
         waitfor = GetZeroTime();
       }
 #if defined(HAVE_EPOLL_PWAIT2) && !defined(MUSL_CROSS_MAKE)
-      rc = epoll_pwait2(epfd, events, maxevents, &waitfor, &oldmask);
+      rc = epoll_pwait2(hostep, events, maxevents, &waitfor, &oldmask);
 #else
-      rc = epoll_pwait(epfd, events, maxevents,
+      rc = epoll_pwait(hostep, events, maxevents,
                        ConvertTimeToInt(ToMilliseconds(waitfor)), &oldmask);
 #endif
       if (rc == -1 && errno == EINTR) {
@@ -5567,6 +5783,7 @@ static i32 EpollPwait(struct Machine *m, i32 epfd, i64 eventsaddr,
     unassert(!CopyToUserWrite(m, eventsaddr, gevents,
                               rc * sizeof(struct epoll_event_linux)));
   }
+  VfsReleaseHostFd(ep_lease);
   return rc;
 }
 
@@ -5737,6 +5954,7 @@ void OpSyscall(P) {
     SYSCALL(2, 0x071, "setreuid", SysSetreuid, STRACE_SETREUID);
     SYSCALL(2, 0x072, "setregid", SysSetregid, STRACE_SETREGID);
     SYSCALL(2, 0x082, "rt_sigsuspend", SysSigsuspend, STRACE_SIGSUSPEND);
+    SYSCALL(4, 0x080, "rt_sigtimedwait", SysSigtimedwait, STRACE_4);
     SYSCALL(2, 0x083, "sigaltstack", SysSigaltstack, STRACE_2);
     SYSCALL(3, 0x085, "mknod", SysMknod, STRACE_3);
     SYSCALL(2, 0x09E, "arch_prctl", SysArchPrctl, STRACE_2);
@@ -5850,6 +6068,10 @@ void OpSyscall(P) {
     SYSCALL(5, 0x147, "preadv2", SysPreadv2, STRACE_PREADV2);
     SYSCALL(5, 0x148, "pwritev2", SysPwritev2, STRACE_PWRITEV2);
     SYSCALL(3, 0x1B4, "close_range", SysCloseRange, STRACE_3);
+#ifdef HAVE_EVENTFD
+    SYSCALL(1, 0x11C, "eventfd", SysEventfd, STRACE_1);
+    SYSCALL(2, 0x122, "eventfd2", SysEventfd2, STRACE_2);
+#endif
 #ifdef HAVE_EPOLL_PWAIT1
     SYSCALL(1, 0x0D5, "epoll_create", SysEpollCreate, STRACE_1);
     SYSCALL(1, 0x123, "epoll_create1", SysEpollCreate1, STRACE_1);

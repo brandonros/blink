@@ -1503,6 +1503,43 @@ int VfsFstatfs(int fd, HostStatfs *st) {
   return rc;
 }
 
+/* Takes ownership of fd, including on failure. */
+int VfsImportHostFd(int fd) {
+  struct VfsInfo *info;
+  int res, err;
+  if (HostfsWrapFd(fd, false, &info) == -1) return -1;
+  if ((res = VfsAddFd(info)) == -1) {
+    err = errno;
+    unassert(!VfsFreeInfo(info));
+    errno = err;
+  }
+  return res;
+}
+
+int VfsAcquireHostFd(int fd, struct VfsInfo **lease) {
+  int res, err;
+  *lease = 0;
+  if (VfsGetFd(fd, lease) == -1) return -1;
+  if ((*lease)->device->ops->Gethostfd) {
+    res = (*lease)->device->ops->Gethostfd(*lease);
+  } else {
+    res = enotsup();
+  }
+  if (res == -1) {
+    err = errno;
+    unassert(!VfsFreeInfo(*lease));
+    *lease = 0;
+    errno = err;
+  }
+  return res;
+}
+
+void VfsReleaseHostFd(struct VfsInfo *lease) {
+  int err = errno;
+  if (lease) unassert(!VfsFreeInfo(lease));
+  errno = err;
+}
+
 int VfsFstat(int fd, struct stat *st) {
   struct VfsInfo *info;
   int ret;

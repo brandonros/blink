@@ -423,6 +423,10 @@ struct Machine {               //
   struct PageLocks pagelocks;            // track page table entry locks
   struct JitPath path;                   // under construction jit route
   _Atomicish(u64) signals;               // [attention] pending delivery
+  struct {
+    _Atomic(int) state;  // 0 empty, 1 publishing, 2 pending
+    struct siginfo_linux info;
+  } pending_signals[64];
   _Atomicish(u64) sigmask;               // signals that've been blocked
   i64 bofram[2];                         // helps debug bootloading code
   i64 faultaddr;                         // used for tui error reporting
@@ -454,9 +458,15 @@ struct Machine {               //
   sigset_t spawn_sigmask;                //
   struct Dll elem;                       //
   struct SmcQueue smcqueue;              //
+  unsigned fault_trace_next;
+  unsigned fault_trace_count;
+  struct { u64 ip, sp, bp; } fault_trace[64];
   struct OpCache opcache[1];             //
 };  //
 
+extern bool g_trace_faults;
+extern _Thread_local u64 g_fault_host_pc;
+void DumpFaultTrace(struct Machine *, int, int);
 extern struct HostPages g_hostpages;
 extern _Thread_local siginfo_t g_siginfo;
 extern _Thread_local struct Machine *g_machine;
@@ -715,6 +725,7 @@ void OpPmuldq(P);
 void OpInsertps(P);
 void OpPhminposuw(P);
 void OpMpsadbw(P);
+void OpDot(P);
 void OpPinsrwVdqEwIb(P);
 void OpPinsrbVdqEdIb(P);
 void OpPinsrdVdqEdqpIb(P);
