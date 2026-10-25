@@ -1114,15 +1114,23 @@ impl Cpu for X86 {
                 self.regs[3] = 0;
                 if leaf == 0 {
                     self.regs[0] = 1;
-                    self.regs[3] = u32::from_le_bytes(*b"Blin") as u64;
-                    self.regs[2] = u32::from_le_bytes(*b"kRus") as u64;
-                    self.regs[1] = u32::from_le_bytes(*b"tCPU") as u64;
+                    // glibc 2.36 skips leaf 1 for unknown vendors. Use an
+                    // Intel-compatible persona, identified as virtual below.
+                    self.regs[3] = u32::from_le_bytes(*b"Genu") as u64;
+                    self.regs[2] = u32::from_le_bytes(*b"ineI") as u64;
+                    self.regs[1] = u32::from_le_bytes(*b"ntel") as u64;
                 } else if leaf == 1 {
                     // Implemented instruction groups, qualified by native oracles;
                     // see rust/CPU-FEATURES.md. Do not infer bits from the decoder.
-                    self.regs[1] = 1 << 13; // CMPXCHG16B
+                    self.regs[0] = 0x600; // generic family 6, no model-specific tuning
+                    self.regs[1] = (1 << 13) | (1 << 31); // CX16 and hypervisor
                     self.regs[2] =
-                        (1 << 8) | (1 << 15) | (1 << 23) | (1 << 24) | (1 << 25) | (1 << 26);
+                        1 | (1 << 8) | (1 << 15) | (1 << 23) | (1 << 24) | (1 << 25) | (1 << 26);
+                } else if leaf == 0x40000000 {
+                    self.regs[0] = 0x40000000;
+                    self.regs[3] = u32::from_le_bytes(*b"Blin") as u64;
+                    self.regs[1] = u32::from_le_bytes(*b"kRus") as u64;
+                    self.regs[2] = u32::from_le_bytes(*b"tCPU") as u64;
                 }
             }
             Op::LAHF => self.regs[0] = (self.regs[0] & !0xff00) | ((self.flags & 0xd5 | 2) << 8),
@@ -1508,17 +1516,37 @@ mod sse_memory_tests {
         ));
     }
     #[test]
-    fn cpuid_advertises_only_qualified_simd_groups() {
+    fn cpuid_advertises_qualified_groups_and_virtual_identity() {
         let (mut cpu, mut memory) = run(&[0x0f, 0xa2], 0);
         cpu.regs[0] = 1;
         cpu.step(&mut memory).unwrap();
-        assert_eq!(cpu.regs[2], 0x07808100);
-        assert_eq!(cpu.regs[1], 1 << 13); // CX16, no SSE3/SSSE3/SSE4/AVX
+        assert_eq!(cpu.regs[2], 0x07808101);
+        assert_eq!(cpu.regs[1], (1 << 13) | (1 << 31)); // CX16/hypervisor, no SSE3/SSSE3/SSE4/AVX
         cpu.rip = 4096;
         cpu.regs[0] = 7;
         cpu.regs[1] = 0;
         cpu.step(&mut memory).unwrap();
         assert_eq!(&cpu.regs[..4], &[0; 4]); // no BMI/AVX2
+        cpu.rip = 4096;
+        cpu.regs[0] = 0;
+        cpu.step(&mut memory).unwrap();
+        assert_eq!(cpu.regs[0], 1);
+        assert_eq!(
+            [cpu.regs[3] as u32, cpu.regs[2] as u32, cpu.regs[1] as u32]
+                .map(u32::to_le_bytes)
+                .concat(),
+            b"GenuineIntel"
+        );
+        cpu.rip = 4096;
+        cpu.regs[0] = 0x40000000;
+        cpu.step(&mut memory).unwrap();
+        assert_eq!(cpu.regs[0], 0x40000000);
+        assert_eq!(
+            [cpu.regs[3] as u32, cpu.regs[1] as u32, cpu.regs[2] as u32]
+                .map(u32::to_le_bytes)
+                .concat(),
+            b"BlinkRustCPU"
+        );
     }
     #[test]
     fn insert_word_reads_only_two_bytes_at_page_end() {

@@ -715,7 +715,8 @@ pub(super) fn run(
                         } else {
                             (args[0], args[1], if nr == 6 { 256 } else { 0 })
                         };
-                        if flags & !(256 | 4096) != 0 {
+                        // AT_NO_AUTOMOUNT is a no-op in the guest filesystem.
+                        if flags & !(256 | 2048 | 4096) != 0 {
                             return Err(Error::UnsupportedSyscall(number));
                         }
                         let path = cstring(&process.memory.borrow(), ptr);
@@ -1199,6 +1200,15 @@ pub(super) fn run(
                                                     status.set(flag != 0);
                                                     0
                                                 }
+                                                Some(
+                                                    Fd::Directory(_, status)
+                                                    | Fd::File {
+                                                        nonblock: status, ..
+                                                    },
+                                                ) => {
+                                                    status.set(flag != 0);
+                                                    0
+                                                }
                                                 Some(Fd::Reader(p)) => {
                                                     p.borrow_mut().read_nonblock = flag != 0;
                                                     0
@@ -1303,7 +1313,9 @@ pub(super) fn run(
                                             0
                                         }
                                     }
-                                    Fd::Directory(_) => 0x18000,
+                                    Fd::Directory(_, status) => {
+                                        0x18000 | if status.get() { 0x800 } else { 0 }
+                                    }
                                     Fd::Internet(s) => {
                                         2 | if s.borrow().nonblock { 0x800 } else { 0 }
                                     }
@@ -1335,6 +1347,7 @@ pub(super) fn run(
                                         read,
                                         write,
                                         append,
+                                        nonblock,
                                         ..
                                     } => {
                                         (if *read && *write {
@@ -1343,12 +1356,24 @@ pub(super) fn run(
                                             1
                                         } else {
                                             0
-                                        }) | (if *append { 1024 } else { 0 })
+                                        }) | 0x8000
+                                            | (if *append { 1024 } else { 0 })
+                                            | (if nonblock.get() { 0x800 } else { 0 })
                                     }
                                 },
                                 4 => match &fd {
                                     Fd::Stdin(status) | Fd::Stdout(status) | Fd::Stderr(status) => {
                                         status.set(args[2] & 0x800 != 0);
+                                        0
+                                    }
+                                    Fd::Directory(_, status) => {
+                                        status.set(args[2] & 0x800 != 0);
+                                        0
+                                    }
+                                    Fd::File {
+                                        nonblock, append, ..
+                                    } if (args[2] & 1024 != 0) == *append => {
+                                        nonblock.set(args[2] & 0x800 != 0);
                                         0
                                     }
                                     Fd::Reader(p) => {
@@ -1751,7 +1776,7 @@ pub(super) fn run(
                             0
                         }
                     }
-                    334 => errno(38), // rseq is explicitly unavailable; libc may use its documented fallback.
+                    332 | 334 => errno(38), // statx/rseq are unavailable; libc may use its documented fallback.
                     318 => {
                         if args[2] & !3 != 0 {
                             errno(22)
@@ -2078,8 +2103,40 @@ pub(super) fn run(
                         }
                         continue;
                     }
-                    2 | 257 => {
-                        let (pathptr, flags, mode) = if nr == 2 {
+                    204 => {
+                        let target = args[0] as u32;
+                        if target != 0 && target != pid && !processes.contains_key(&target) {
+                            errno(3)
+                        } else if args[1] < 8 || args[1] & 7 != 0 {
+                            errno(22)
+                        } else if process.memory.borrow_mut().store(args[2], 1, 8).is_err() {
+                            errno(14)
+                        } else {
+                            // One virtual scheduling CPU, independent of host topology.
+                            8
+                        }
+                    }
+                    221 => {
+                        let fds = process.fds.borrow();
+                        match fds.get(&(args[0] as i32)) {
+                            None => errno(9),
+                            Some(
+                                Fd::Reader(_)
+                                | Fd::Writer(_)
+                                | Fd::Socket(_)
+                                | Fd::Internet(_)
+                                | Fd::UnixSocket { .. },
+                            ) => errno(29),
+                            Some(_) if (args[2] as i64) < 0 || args[3] > 5 => errno(22),
+                            // Advisory cache policy has no effect on the
+                            // interpreter's file semantics or guest mappings.
+                            Some(_) => 0,
+                        }
+                    }
+                    2 | 85 | 257 => {
+                        let (pathptr, flags, mode) = if nr == 85 {
+                            (args[0], 0x241, args[1]) // creat = O_WRONLY|O_CREAT|O_TRUNC
+                        } else if nr == 2 {
                             (args[0], args[1], args[2])
                         } else {
                             (args[1], args[2], args[3])
@@ -2145,6 +2202,8 @@ pub(super) fn run(
                                     & !(3
                                         | 64
                                         | 128
+                                        | 256 // O_NOCTTY: no terminal devices are exposed
+                                        | 0x800 // O_NONBLOCK: retained, no effect on regular file I/O
                                         | 512
                                         | 1024
                                         | 0x8000
@@ -2227,7 +2286,7 @@ pub(super) fn run(
                                     _ => errno(29),
                                 }
                             }
-                            Some(Fd::Directory(directory)) => {
+                            Some(Fd::Directory(directory, _)) => {
                                 if args[2] == 1 && args[1] == 0 {
                                     directory.borrow().position
                                 } else if args[2] == 0 && args[1] == 0 {
@@ -2273,7 +2332,7 @@ pub(super) fn run(
                                     file_control(&file.borrow(), nr, args[1])
                                 }
                             }
-                            Some(Fd::Directory(d)) if nr != 77 => {
+                            Some(Fd::Directory(d, _)) if nr != 77 => {
                                 file_control(&d.borrow().file, nr, args[1])
                             }
                             _ => Err(std::io::ErrorKind::InvalidInput.into()),
@@ -2471,7 +2530,12 @@ pub(super) fn run(
                         let thread = nr == 56 && args[0] & 0x10000 != 0;
                         let flags = args[0];
                         if nr == 56
-                            && ((!thread && !vfork && (flags != 17 || args[1] != 0))
+                            && ((!thread
+                                && !vfork
+                                && (flags & 255 != 17
+                                    || flags & !(17 | 0x100000 | 0x200000 | 0x1000000 | 0x400000)
+                                        != 0
+                                    || args[1] != 0))
                                 || (thread
                                     && (flags & 0x10f00 != 0x10f00
                                         || flags
@@ -2492,7 +2556,7 @@ pub(super) fn run(
                         } else {
                             args[4]
                         };
-                        let bad_tid = thread
+                        let bad_tid = nr == 56
                             && ((flags & 0x100000 != 0
                                 && process
                                     .memory
@@ -2553,23 +2617,6 @@ pub(super) fn run(
                                         args[3]
                                     });
                                 }
-                                if flags & 0x100000 != 0 {
-                                    process.memory.borrow_mut().store(
-                                        args[2],
-                                        child_pid as u64,
-                                        4,
-                                    )?;
-                                }
-                                if flags & 0x1000000 != 0 {
-                                    process.memory.borrow_mut().store(
-                                        child_tid,
-                                        child_pid as u64,
-                                        4,
-                                    )?;
-                                }
-                                if flags & 0x200000 != 0 {
-                                    child.clear_tid = child_tid;
-                                }
                             } else {
                                 if !vfork {
                                     child.memory =
@@ -2590,6 +2637,25 @@ pub(super) fn run(
                                     Rc::new(RefCell::new(time::RealTimer::default()));
                                 child.group = child_pid;
                                 child.parent = process.group;
+                            }
+                            if nr == 56 {
+                                if flags & 0x100000 != 0 {
+                                    process.memory.borrow_mut().store(
+                                        args[2],
+                                        child_pid as u64,
+                                        4,
+                                    )?;
+                                }
+                                if flags & 0x1000000 != 0 {
+                                    child.memory.borrow_mut().store(
+                                        child_tid,
+                                        child_pid as u64,
+                                        4,
+                                    )?;
+                                }
+                                if flags & 0x200000 != 0 {
+                                    child.clear_tid = child_tid;
+                                }
                             }
                             child.cpu.cpu().set_result(0);
                             processes.insert(child_pid, child);
@@ -2953,7 +3019,7 @@ pub(super) fn run(
                                             read as u64
                                         }
                                     }
-                                    (0, Fd::Directory(_)) => errno(21),
+                                    (0, Fd::Directory(_, _)) => errno(21),
                                     (_, Fd::Internet(endpoint)) => {
                                         let result = internet::transfer(
                                             &mut process.memory.borrow_mut(),
@@ -3315,9 +3381,13 @@ fn open_file(
         flags & 64 != 0,
     )?;
     if path.is_dir() && flags & (3 | 64 | 512 | 1024) == 0 {
-        return Ok(Fd::Directory(Rc::new(RefCell::new(
-            blink_host::Directory::open(path, config.rootfs.clone())?,
-        ))));
+        return Ok(Fd::Directory(
+            Rc::new(RefCell::new(blink_host::Directory::open(
+                path,
+                config.rootfs.clone(),
+            )?)),
+            Rc::new(Cell::new(flags & 0x800 != 0)),
+        ));
     }
     if flags & 0x10000 != 0 && !path.is_dir() {
         return Err(std::io::ErrorKind::NotADirectory.into());
@@ -3365,6 +3435,7 @@ fn open_file(
         write,
         cloexec: flags & 0x80000 != 0,
         append: flags & 1024 != 0,
+        nonblock: Rc::new(Cell::new(flags & 0x800 != 0)),
     })
 }
 
@@ -3858,7 +3929,7 @@ fn poll_events(fd: Option<&Fd>, wanted: u16) -> u16 {
         Some(Fd::Stdout(_) | Fd::Stderr(_)) => 4 | 256,
         // Linux regular files are always ready, even if the following I/O
         // will fail because the descriptor's access mode does not permit it.
-        Some(Fd::File { .. } | Fd::Directory(_)) => 1 | 4 | 64 | 256,
+        Some(Fd::File { .. } | Fd::Directory(_, _)) => 1 | 4 | 64 | 256,
     };
     available & (wanted | 8 | 16 | 32)
 }
@@ -4179,7 +4250,7 @@ fn read_directory(process: &Process, args: [u64; 6]) -> Result<u64> {
     }
     let directory = match fds.get(&(args[0] as i32)) {
         None => return Ok(errno(9)),
-        Some(Fd::Directory(d)) => d,
+        Some(Fd::Directory(d, _)) => d,
         _ => return Ok(errno(20)),
     };
     let count = args[2].min(65536) as usize;
@@ -4233,7 +4304,7 @@ fn change_owner(config: &RuntimeConfig, process: &Process, nr: u64, args: [u64; 
             None => return Ok(errno(9)),
             Some(Fd::File { file, .. }) => blink_host::metadata::Target::File(&file.borrow())
                 .chown(uid as u32, gid as u32, true),
-            Some(Fd::Directory(d)) => blink_host::metadata::Target::File(&d.borrow().file)
+            Some(Fd::Directory(d, _)) => blink_host::metadata::Target::File(&d.borrow().file)
                 .chown(uid as u32, gid as u32, true),
             _ => return Err(Error::UnsupportedSyscall(nr)),
         }
@@ -4330,7 +4401,7 @@ fn change_times(config: &RuntimeConfig, process: &Process, args: [u64; 6]) -> Re
         match process.fds.borrow().get(&(args[0] as i32)) {
             None => return Ok(errno(9)),
             Some(Fd::File { file, .. }) => file.borrow().set_times(times),
-            Some(Fd::Directory(d)) => d.borrow().file.set_times(times),
+            Some(Fd::Directory(d, _)) => d.borrow().file.set_times(times),
             _ => return Err(Error::UnsupportedSyscall(280)),
         }
     } else {
@@ -4405,7 +4476,7 @@ fn filesystem_info(
         match process.fds.borrow().get(&(args[0] as i32)) {
             None => return Ok(errno(9)),
             Some(Fd::File { file, .. }) => blink_host::filesystem_stat(&file.borrow()),
-            Some(Fd::Directory(d)) => blink_host::filesystem_stat(&d.borrow().file),
+            Some(Fd::Directory(d, _)) => blink_host::filesystem_stat(&d.borrow().file),
             _ => return Err(Error::UnsupportedSyscall(nr)),
         }
     } else {
@@ -4461,7 +4532,7 @@ fn directory_cwd(
                 Err(errno(20))
             }
         }
-        Some(Fd::Directory(directory)) => directory
+        Some(Fd::Directory(directory, _)) => directory
             .borrow()
             .path
             .strip_prefix(&config.rootfs)

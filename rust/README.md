@@ -85,7 +85,7 @@ Implemented slices:
 - Bounded capture, timeout/cancellation (including blocked pipes/futexes), and
   explicit exit/signal/timeout/cancel/budget outcomes separate from engine errors.
 
-CPUID exposes the qualified CMOV/MMX/FXSR/SSE/SSE2 groups described in [CPU-FEATURES.md](CPU-FEATURES.md). Unsupported opcodes,
+CPUID exposes the qualified FPU/CX8/CX16/CMOV/MMX/FXSR/SSE/SSE2 groups described in [CPU-FEATURES.md](CPU-FEATURES.md). Unsupported opcodes,
 syscalls, and flags are explicit errors, not silent approximations or fallback.
 The first actual C translation is the integer signal context layout/save order;
 its source retains upstream ISC notices.
@@ -95,8 +95,7 @@ its source retains upstream ISC notices.
 Alpine 3.22.7 AMD64 musl/BusyBox passes four real shell cases: echo, a pipeline
 with external exec, file redirection/append, and command substitution. The smoke
 harness uses disposable root copies and also passes with the C interpreter.
-Static glibc hello passes; this host's dynamic glibc refuses the conservative
-CPUID capability set. `apk-smoke.py` passes seven offline gates: version, installed-package listing,
+Static glibc hello and the pinned Debian/glibc gates below pass. `apk-smoke.py` passes seven offline gates: version, installed-package listing,
 simulation, a persisted world update, installation of a newly constructed local
 APKv2 package, execution/metadata verification, and removal (including BusyBox's
 trigger). The package contains payload checksums and a post-install shell script;
@@ -115,7 +114,7 @@ replace the 26 agent-platform checkpoint receipts.
 Broad ISA/SIMD/FPU coverage, shared file mappings, remaining directory-relative
 *at operations, broader VFS/procfs, UDP/DNS, and JIT remain. ARM64 signal frames,
 threaded exec, queued realtime signals, job control,
-handlers for synchronous faults remain.
+handlers for memory/illegal-instruction faults remain.
 No image-build checkpoint or verifier has passed with Rust.
 
 Memory limits count unique mapped guest pages across threads and forked processes;
@@ -287,8 +286,8 @@ The guest owns an eight-entry 80-bit register stack, tags, control/status words,
 and deferred arithmetic exceptions. Software APFloat handles extended-precision
 add/subtract/multiply/divide, comparisons, integral rounding, integer and float
 loads/stores, and stack operations. Signal handlers start with a fresh x87 state;
-sigreturn restores the saved stack and control word. An unmasked exception
-preserves the destination/stack and faults on the next waiting instruction.
+sigreturn restores the saved stack and control word. Unmasked x87 exceptions set deferred fault state; destination/stack completion
+depends on the operation and exception, as qualified below.
 
 `python3 rust/x87-regressions.py` compares 273,926 native AMD64 result/status records,
 including 80-bit extrema, NaNs, denormals, all three precision controls, four rounding modes, comparisons and
@@ -297,10 +296,10 @@ overflow, deferred faults, and signal-frame preservation. The adapter handles
 x87 NaN priority and the APFloat directed-overflow flag difference. CI replays
 this native-generated fixture on Apple Silicon as well as the SSE fixture.
 
-This is partial x87 support. Transcendentals, remaining arithmetic operations and complete
-unsupported-encoding behavior remain; unsupported operations fail explicitly.
-The complete x87 FPU feature remains unadvertised. No Node/Bun workload or
-new agent-platform checkpoint is established by these instruction tests.
+The x87 baseline now includes the arithmetic, transcendental and exception
+extensions described below and is advertised through CPUID after those gates.
+This does not establish exhaustive conformance, Bun support or a new full
+agent-platform build checkpoint by itself.
 
 The 24/53-bit x87 arithmetic modes use a 111-bit intermediate with a wider
 exponent range. Discarded bits are retained through round-to-odd before final
@@ -563,7 +562,8 @@ explicit minimum-normal FPATAN underflow boundary described below. Observed maxi
 were about 1.265 ulps native and 1 ulp Rust; 22,710 results differed in their last bit.
 CI replays the fixture and accuracy checks on Apple Silicon. The exact arithmetic
 oracle remains separate and bit-exact. These corpora are not exhaustive proofs,
-and the complete x87 FPU feature remains unadvertised.
+and do not establish exhaustive x87 conformance. The qualified baseline is
+advertised through CPUID; see CPU-FEATURES.md.
 
 The persistent builder adapter is in
 [linux-oci-builder PR #1](https://github.com/brandonros/linux-oci-builder/pull/1).
@@ -592,7 +592,7 @@ on underflow status because the mathematical correction is far below extended
 precision. The gate permits only UE differences for those exact input boundaries
 (and its signed/pseudo-denormal forms), retaining every occurrence in the report.
 All other exception comparisons remain strict. C1 and last-bit differences remain
-expected for approximate instructions, and full FPU support is still incomplete.
+expected for approximate instructions, without claiming exhaustive FPU conformance.
 
 Unmasked precision exceptions now commit the rounded result, memory store and
 stack pop before setting the deferred exception state. A separate 32,928-record
@@ -624,3 +624,22 @@ and pushes before trapping), overflow/underflow FST memory operations (which do
 not round, store or pop), signaling-NaN loads/stores and legacy 8087/287 no-ops
 with pending exceptions. These native checks caught distinct completion rules
 that cannot be represented by a single blanket “unmasked means no write” rule.
+
+## Debian/glibc qualification
+
+The pinned Debian bookworm AMD64 manifest is
+`sha256:ec31d744f83f4a73447ba045aaab9409997efe5cc706eca4890c1be36cc1606a`.
+Download it through linux-oci-builder, extract it with `rust/debian-fixture.py`,
+and run `python3 rust/debian-smoke.py --root ROOT`. Its six gates cover glibc 2.36,
+shell exec/wait, forked sort/uniq pipelines, numeric formatting, rootless ownership
+and modes, and GNU tar's POSIX archive round trip. CI runs these on Linux and
+Apple Silicon. The fixture loader verifies manifest/config/layer digests and
+sizes; it is deliberately not a general OCI assembler.
+
+The runtime accepts fork-style clone with parent/child TID writes and clear-TID,
+interprets wait4's pid_t as signed 32-bit, implements creat through open semantics,
+and supports advisory fadvise and a one-CPU guest affinity mask. Regular-file and
+directory O_NONBLOCK state survives dup/fork and fcntl/ioctl updates; O_NOCTTY and
+AT_NO_AUTOMOUNT have no operational effect on the guest filesystem. statx remains
+explicitly unavailable (ENOSYS), allowing glibc's fstatat fallback. A native ABI
+fixture checks these paths independently of the Debian workloads.

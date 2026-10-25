@@ -62,6 +62,11 @@ jobs:
         run: |
           python3 rust/node-fixture.py --layout target/node-oci --root target/amd64-node
           python3 rust/node-smoke.py --root target/amd64-node
+      - name: Pull and run pinned Debian glibc fixture
+        run: |
+          cargo run --release --locked --manifest-path work/builder/Cargo.toml -- docker.io/library/debian@sha256:ec31d744f83f4a73447ba045aaab9409997efe5cc706eca4890c1be36cc1606a --platform linux/amd64 --output target/debian-oci
+          python3 rust/debian-fixture.py --layout target/debian-oci --root target/amd64-debian
+          python3 rust/debian-smoke.py --root target/amd64-debian
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -72,6 +77,7 @@ jobs:
             target/rootless-smoke/results.json
             target/apk-smoke/results.json
             target/node-smoke/results.json
+            target/debian-smoke/results.json
             target/worker-smoke/results.json
       - uses: actions/upload-artifact@v4
         if: always() && runner.os == 'Linux'
@@ -83,6 +89,7 @@ jobs:
             target/differential/atomic-x86_64
             target/differential/fpenv-x86_64
             target/differential/fpsignal-x86_64
+            target/differential/glibcabi-x86_64
             target/tcp-smoke/results.json
             target/float-regressions/float-x86_64
             target/float-regressions/native.bin
@@ -127,6 +134,7 @@ jobs:
           cargo run --release --locked -p blink-cli -- target/oracle/differential/atomic-x86_64
           cargo run --release --locked -p blink-cli -- target/oracle/differential/fpenv-x86_64
           cargo run --release --locked -p blink-cli -- target/oracle/differential/fpsignal-x86_64
+          cargo run --release --locked -p blink-cli -- target/oracle/differential/glibcabi-x86_64
           python3 -m venv target/precision-python
           target/precision-python/bin/pip install mpmath==1.3.0
           target/precision-python/bin/python rust/transcend-regressions.py --replay target/oracle/transcend-regressions

@@ -86,7 +86,10 @@ pub enum Fd {
     Internet(Rc<RefCell<InternetSocket>>),
     Socket(Rc<Socket>),
     Virtual(Rc<RefCell<VirtualOpen>>),
-    Directory(Rc<RefCell<blink_host::Directory>>),
+    Directory(
+        Rc<RefCell<blink_host::Directory>>,
+        Rc<std::cell::Cell<bool>>,
+    ),
     UnixSocket {
         inode: u64,
         nonblock: bool,
@@ -97,6 +100,7 @@ pub enum Fd {
         write: bool,
         cloexec: bool,
         append: bool,
+        nonblock: Rc<std::cell::Cell<bool>>,
     },
     Stdin(Rc<std::cell::Cell<bool>>),
     Stdout(Rc<std::cell::Cell<bool>>),
@@ -112,7 +116,7 @@ impl Clone for Fd {
             Self::Socket(s) => Self::Socket(s.clone()),
             Self::Internet(s) => Self::Internet(s.clone()),
             Self::Virtual(v) => Self::Virtual(v.clone()),
-            Self::Directory(d) => Self::Directory(d.clone()),
+            Self::Directory(d, status) => Self::Directory(d.clone(), status.clone()),
             Self::UnixSocket { inode, nonblock } => Self::UnixSocket {
                 inode: *inode,
                 nonblock: *nonblock,
@@ -123,12 +127,14 @@ impl Clone for Fd {
                 write,
                 cloexec,
                 append,
+                nonblock,
             } => Self::File {
                 file: file.clone(),
                 read: *read,
                 write: *write,
                 cloexec: *cloexec,
                 append: *append,
+                nonblock: nonblock.clone(),
             },
             Self::Stdin(status) => Self::Stdin(status.clone()),
             Self::Stdout(status) => Self::Stdout(status.clone()),
@@ -216,7 +222,7 @@ impl Fd {
             Self::File { file, .. } => {
                 blink_host::metadata::Target::File(&file.borrow()).stat(rootless)
             }
-            Self::Directory(d) => {
+            Self::Directory(d, _) => {
                 blink_host::metadata::Target::File(&d.borrow().file).stat(rootless)
             }
             _ => Ok(FileStat {
