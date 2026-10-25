@@ -12,6 +12,7 @@ pub enum Error {
     UnsupportedInstruction { pc: u64, encoding: u32 },
     UnsupportedSyscall(u64),
     ArithmeticFault,
+    FloatingPointFault { exceptions: u8, simd: bool },
     BusFault { address: u64 },
     ResourceLimit,
     InvalidConfig(String),

@@ -606,5 +606,15 @@ FSCALE also applies trap exponent adjustment, including extreme exponents whose
 adjusted result still saturates to infinity/zero. The transcendental gate also covers unmasked overflow/underflow, undoing the
 trap exponent adjustment before independent accuracy checks and retaining full
 significand precision for adjusted subnormals. Both FSINCOS/FPTAN outputs and
-FPATAN/logarithm pops are checked. Guest synchronous SIGFPE delivery
-remains outstanding; this does not complete the x87 exception model.
+FPATAN/logarithm pops are checked. Synchronous arithmetic faults now enter guest SIGFPE handlers as described
+below; these tests still do not establish complete x87 conformance.
+
+Synchronous integer divide, x87 deferred exceptions and SSE exceptions enter
+installed AMD64 guest SIGFPE handlers with the faulting instruction address,
+Linux si_code and trap number. The rt_sigframe preserves the actual FP state;
+the handler starts with clean FP controls and can edit its saved context before
+rt_sigreturn. Blocked, ignored or default SIGFPE dispositions terminate the guest.
+The native fpsignal fixture checks recovery on an alternate stack for integer
+divide, x87 divide/precision and SSE divide faults, plus fatal dispositions in
+forked children. It is replayed on Apple Silicon. This does not yet add catchable
+SIGSEGV/SIGBUS/SIGILL, core dumps or complete Linux synchronous-signal behavior.

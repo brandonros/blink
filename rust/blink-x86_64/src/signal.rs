@@ -55,6 +55,8 @@ pub struct SignalInfo {
     pub uid: u32,
     pub code: i32,
     pub status: i32,
+    pub address: Option<u64>,
+    pub trap: u64,
 }
 pub struct SignalContext {
     pub signal: u32,
@@ -137,9 +139,14 @@ impl X86 {
         put(&mut frame, UC + 296, mask);
         put(&mut frame, INFO, signal as u64);
         frame[INFO + 8..INFO + 12].copy_from_slice(&info.code.to_le_bytes());
-        frame[INFO + 16..INFO + 20].copy_from_slice(&info.sender.to_le_bytes());
-        frame[INFO + 20..INFO + 24].copy_from_slice(&info.uid.to_le_bytes());
-        frame[INFO + 24..INFO + 28].copy_from_slice(&info.status.to_le_bytes());
+        if let Some(address) = info.address {
+            put(&mut frame, INFO + 16, address);
+            put(&mut frame, UC + 200, info.trap);
+        } else {
+            frame[INFO + 16..INFO + 20].copy_from_slice(&info.sender.to_le_bytes());
+            frame[INFO + 20..INFO + 24].copy_from_slice(&info.uid.to_le_bytes());
+            frame[INFO + 24..INFO + 28].copy_from_slice(&info.status.to_le_bytes());
+        }
         put(&mut frame, UC + 224, sp + 440);
         self.fpu.save_legacy(&mut frame[440..]);
         frame[464..468].copy_from_slice(&self.mxcsr.to_le_bytes());

@@ -466,6 +466,12 @@ impl Fpu {
     pub fn status(&self) -> u16 {
         (self.status & !0x3800) | ((self.top as u16) << 11)
     }
+    pub(super) fn fault(&self) -> Error {
+        Error::FloatingPointFault {
+            exceptions: (self.status & !self.control & 63) as u8,
+            simd: false,
+        }
+    }
     fn exception(&mut self, mut bits: u16) -> bool {
         if bits & !self.control & 2 != 0 {
             // An unmasked denormal operand prevents result computation.
@@ -696,7 +702,7 @@ impl X86 {
             Op::FNINIT | Op::FNCLEX | Op::FNSTCW | Op::FNSTSW | Op::FNSTENV | Op::FNSAVE
         ) && self.fpu.status & !self.fpu.control & 63 != 0
         {
-            return Err(Error::ArithmeticFault);
+            return Err(self.fpu.fault());
         }
         if !matches!(
             op,
@@ -2102,7 +2108,7 @@ mod tests {
             assert_eq!(cpu.fpu.status() & 0x80bf, 0x80b2);
             assert!(matches!(
                 cpu.x87(&mut memory, Op::WAIT, None, None, 0x1000),
-                Err(Error::ArithmeticFault)
+                Err(Error::FloatingPointFault { .. })
             ));
         }
     }
@@ -2125,7 +2131,7 @@ mod tests {
         assert_eq!(cpu.fpu.status() & 0x80bf, 0x8088);
         assert!(matches!(
             cpu.x87(&mut memory, Op::WAIT, None, None, 0x1000),
-            Err(Error::ArithmeticFault)
+            Err(Error::FloatingPointFault { .. })
         ));
     }
     #[test]
@@ -2141,7 +2147,7 @@ mod tests {
         assert_eq!(cpu.fpu.status() & 0x82a0, 0x82a0);
         assert!(matches!(
             cpu.x87(&mut memory, Op::WAIT, None, None, 0x1000),
-            Err(Error::ArithmeticFault)
+            Err(Error::FloatingPointFault { .. })
         ));
     }
     #[test]
@@ -2237,7 +2243,7 @@ mod tests {
         assert_eq!(cpu.fpu.status() & 0x8081, 0x8081);
         assert!(matches!(
             cpu.x87(&mut memory, Op::WAIT, None, None, 0x1000),
-            Err(Error::ArithmeticFault)
+            Err(Error::FloatingPointFault { .. })
         ));
     }
     #[test]
@@ -2290,7 +2296,7 @@ mod tests {
         assert_eq!(memory.load(0x2000, 2).unwrap() & 0x8084, 0x8084);
         assert!(matches!(
             cpu.x87(&mut memory, Op::WAIT, None, None, 0x1000),
-            Err(Error::ArithmeticFault)
+            Err(Error::FloatingPointFault { .. })
         ));
         cpu.x87(&mut memory, Op::FNCLEX, None, None, 0x1000)
             .unwrap();

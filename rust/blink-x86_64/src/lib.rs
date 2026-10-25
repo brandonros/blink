@@ -250,7 +250,7 @@ impl Cpu for X86 {
             .flatten()
             .any(|v| matches!(v, Value::Mmx(_)));
         if (mmx || op == Op::EMMS) && self.fpu.status & !self.fpu.control & 63 != 0 {
-            return Err(Error::ArithmeticFault);
+            return Err(self.fpu.fault());
         }
         if op == Op::EMMS {
             self.fpu.tags = [3; 8];
@@ -1464,7 +1464,10 @@ mod sse_memory_tests {
         let (mut cpu, mut memory) = run(&[0x0f, 0x6f, 0x00], 8192);
         cpu.fpu.control &= !4;
         cpu.fpu.status |= 4;
-        assert!(matches!(cpu.step(&mut memory), Err(Error::ArithmeticFault)));
+        assert!(matches!(
+            cpu.step(&mut memory),
+            Err(Error::FloatingPointFault { .. })
+        ));
         assert_eq!(cpu.fpu.tags, [3; 8]);
     }
     #[test]

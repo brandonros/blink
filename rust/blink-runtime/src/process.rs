@@ -346,7 +346,7 @@ pub(super) fn run(
                 event = Event::Blocked;
                 break;
             }
-            if let Some(signal) = deliver_signal(&mut process)? {
+            if let Some(signal) = deliver_signal(&mut process, None)? {
                 event = Event::Signal(signal);
                 break;
             }
@@ -363,7 +363,8 @@ pub(super) fn run(
                 instructions += 1;
                 process.cpu.cpu().set_ticks(instructions);
                 let pc = process.cpu.cpu().pc();
-                match process.cpu.cpu().step(&mut process.memory.borrow_mut()) {
+                let step = process.cpu.cpu().step(&mut process.memory.borrow_mut());
+                match step {
                     Ok(Step::Continue) => None,
                     Ok(Step::Syscall { number, args }) => {
                         if config.trace {
@@ -375,9 +376,12 @@ pub(super) fn run(
                         event = Event::Signal(7);
                         break;
                     }
-                    Err(Error::ArithmeticFault) => {
-                        event = Event::Signal(8);
-                        break;
+                    Err(error @ (Error::ArithmeticFault | Error::FloatingPointFault { .. })) => {
+                        if let Some(signal) = signals::arithmetic_fault(&mut process, pc, error)? {
+                            event = Event::Signal(signal);
+                            break;
+                        }
+                        continue;
                     }
                     Err(Error::MemoryFault { address, access }) => {
                         if config.trace {
@@ -3363,9 +3367,10 @@ fn open_file(
     })
 }
 
-fn deliver_signal(process: &mut Process) -> Result<Option<i32>> {
+fn deliver_signal(process: &mut Process, forced: Option<usize>) -> Result<Option<i32>> {
     loop {
-        let pending = process.signals.bits & !process.signal_mask;
+        let pending =
+            process.signals.bits & !process.signal_mask & forced.map_or(u64::MAX, |n| 1 << n);
         if pending == 0 {
             return Ok(None);
         }

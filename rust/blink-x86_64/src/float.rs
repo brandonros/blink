@@ -306,7 +306,10 @@ impl X86 {
     fn fp_exceptions(&mut self, flags: u32) -> Result<()> {
         self.mxcsr |= flags;
         if flags & !(self.mxcsr >> 7) & 63 != 0 {
-            return Err(Error::ArithmeticFault);
+            return Err(Error::FloatingPointFault {
+                exceptions: (self.mxcsr & !(self.mxcsr >> 7) & 63) as u8,
+                simd: true,
+            });
         }
         Ok(())
     }
@@ -783,7 +786,10 @@ mod tests {
         cpu.xmm[1][..8].copy_from_slice(&1.5f64.to_le_bytes());
         cpu.xmm[1][8..].copy_from_slice(&f64::INFINITY.to_le_bytes());
         cpu.mxcsr &= !(1 << 7);
-        assert!(matches!(cpu.step(&mut memory), Err(Error::ArithmeticFault)));
+        assert!(matches!(
+            cpu.step(&mut memory),
+            Err(Error::FloatingPointFault { .. })
+        ));
         assert_eq!(cpu.xmm[0], [0xa5; 16]);
         assert_ne!(cpu.mxcsr & 1, 0);
         cpu.rip = 0x1000;
@@ -803,7 +809,10 @@ mod tests {
         cpu.xmm[1][4..8].fill(0);
         let original = cpu.xmm[0];
         cpu.mxcsr &= !(1 << 9); // unmask divide by zero
-        assert!(matches!(cpu.step(&mut memory), Err(Error::ArithmeticFault)));
+        assert!(matches!(
+            cpu.step(&mut memory),
+            Err(Error::FloatingPointFault { .. })
+        ));
         assert_eq!(cpu.xmm[0], original);
         assert_ne!(cpu.mxcsr & 4, 0);
         cpu.rip = 0x1000;

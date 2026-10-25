@@ -84,6 +84,7 @@ pub(super) fn child_exited(
             uid: child.credentials.uid,
             code: if signaled { 2 } else { 1 }, // CLD_KILLED / CLD_EXITED
             status,
+            ..Default::default()
         };
         parent.signals.bits |= bit;
     }
@@ -112,4 +113,54 @@ impl Pending {
             self.bits |= bit;
         }
     }
+}
+
+/// Synchronous arithmetic faults cannot be deferred behind an ignored/blocked
+/// disposition. Handler frames retain the faulting PC and the actual FP state.
+pub(super) fn arithmetic_fault(
+    process: &mut Process,
+    pc: u64,
+    error: Error,
+) -> Result<Option<i32>> {
+    let (code, trap) = match error {
+        Error::ArithmeticFault => (1, 0), // FPE_INTDIV / #DE
+        Error::FloatingPointFault { exceptions, simd } => {
+            let code = if exceptions & 1 != 0 {
+                7
+            }
+            // FPE_FLTINV
+            else if exceptions & 4 != 0 {
+                3
+            }
+            // FPE_FLTDIV
+            else if exceptions & 8 != 0 {
+                4
+            }
+            // FPE_FLTOVF
+            else if exceptions & 18 != 0 {
+                5
+            }
+            // FPE_FLTUND (including denormal)
+            else {
+                6
+            }; // FPE_FLTRES
+            (code, if simd { 19 } else { 16 })
+        }
+        _ => unreachable!(),
+    };
+    if process.signal_mask & (1 << 7) != 0 || process.actions.borrow()[7].handler <= 1 {
+        return Ok(Some(8));
+    }
+    let Engine::X86(cpu) = &mut process.cpu else {
+        return Ok(Some(8));
+    };
+    cpu.rip = pc;
+    process.signals.bits |= 1 << 7;
+    process.signals.info[7] = blink_x86_64::SignalInfo {
+        code,
+        address: Some(pc),
+        trap,
+        ..Default::default()
+    };
+    deliver_signal(process, Some(7))
 }
