@@ -445,7 +445,12 @@ impl Fpu {
     pub fn status(&self) -> u16 {
         (self.status & !0x3800) | ((self.top as u16) << 11)
     }
-    fn exception(&mut self, bits: u16) -> bool {
+    fn exception(&mut self, mut bits: u16) -> bool {
+        if bits & !self.control & 2 != 0 {
+            // An unmasked denormal operand prevents result computation.
+            bits &= !56;
+            self.status &= !0x200;
+        }
         self.status |= bits;
         if self.status & !self.control & 63 != 0 {
             self.status |= 0x8080;
@@ -1450,47 +1455,82 @@ impl X86 {
                     } else if x.is_zero() || x.is_infinite() {
                         left
                     } else {
-                        let limit = Extended::from_u128(40000).value;
+                        let limit = Extended::from_u128(100000).value;
                         let exponent = if y.abs() > limit {
                             if y.is_negative() {
-                                -40000
+                                -100000
                             } else {
-                                40000
+                                100000
                             }
                         } else {
                             y.to_i128_r(32, Round::TowardZero, &mut false).value as i32
                         };
                         let wide: IeeeFloat<Intermediate> = x.convert(&mut false).value;
-                        let scaled = wide.scalbn(exponent);
-                        let converted: rustc_apfloat::StatusAnd<Extended> =
-                            scaled.convert_r(self.fpu.round(), &mut false);
-                        exceptions |= flags(converted.status);
-                        // x87 detects tininess before rounding, including a
-                        // subnormal exact value that rounds up to minimum normal.
-                        if converted.status.contains(Status::INEXACT)
-                            && scaled.abs()
-                                < IeeeFloat::<Intermediate>::from_u128(1).value.scalbn(-16382)
-                        {
-                            exceptions |= 16;
-                        }
-                        let widened: IeeeFloat<Intermediate> =
-                            converted.value.convert(&mut false).value;
-                        rounded_up = widened.abs() > scaled.abs();
-                        if converted.value.abs() == Extended::largest()
-                            && converted.status.contains(Status::INEXACT)
-                            && scaled.abs()
-                                >= IeeeFloat::<Intermediate>::from_u128(1).value.scalbn(16384)
-                        {
+                        let total_exponent = x.ilogb() + exponent;
+                        let adjustment = if self.fpu.control & 8 == 0 && total_exponent >= 16384 {
                             exceptions |= 8;
+                            -24576
+                        } else if self.fpu.control & 16 == 0 && total_exponent < -16382 {
+                            exceptions |= 16;
+                            24576
+                        } else {
+                            0
+                        };
+                        // Once beyond the extended output range, further scaling
+                        // cannot change its rounded overflow/underflow result.
+                        // Bound the wider intermediate without losing trap scaling.
+                        let adjusted_exponent = total_exponent + adjustment;
+                        if adjustment != 0 && !(-16382..16384).contains(&adjusted_exponent) {
+                            // A trap result that remains outside the normal
+                            // exponent range saturates to infinity/zero, even
+                            // under directed rounding, and raises precision.
+                            exceptions |= 32;
+                            rounded_up = adjusted_exponent >= 16384;
+                            if rounded_up {
+                                Extended::INFINITY
+                            } else {
+                                Extended::ZERO
+                            }
+                            .copy_sign(x)
+                            .to_bits()
+                        } else {
+                            let target_exponent =
+                                (total_exponent + adjustment).clamp(-20000, 20000);
+                            let scaled = wide.scalbn(target_exponent - x.ilogb());
+                            let converted: rustc_apfloat::StatusAnd<Extended> =
+                                scaled.convert_r(self.fpu.round(), &mut false);
+                            exceptions |= flags(converted.status);
+                            // x87 detects tininess before rounding, including a
+                            // subnormal exact value that rounds up to minimum normal.
+                            if converted.status.contains(Status::INEXACT)
+                                && scaled.abs()
+                                    < IeeeFloat::<Intermediate>::from_u128(1).value.scalbn(-16382)
+                            {
+                                exceptions |= 16;
+                            }
+                            let widened: IeeeFloat<Intermediate> =
+                                converted.value.convert(&mut false).value;
+                            rounded_up = widened.abs() > scaled.abs();
+                            if converted.value.abs() == Extended::largest()
+                                && converted.status.contains(Status::INEXACT)
+                                && scaled.abs()
+                                    >= IeeeFloat::<Intermediate>::from_u128(1).value.scalbn(16384)
+                            {
+                                exceptions |= 8;
+                            }
+                            converted.value.to_bits()
                         }
-                        converted.value.to_bits()
                     }
                 };
                 self.fpu.status &= !0x200;
                 if rounded_up {
                     self.fpu.status |= 0x200;
                 }
-                if self.fpu.exception(exceptions) {
+                let complete = self.fpu.exception(exceptions);
+                if complete
+                    || (exceptions & !self.fpu.control & 24 != 0
+                        && exceptions & !self.fpu.control & 7 == 0)
+                {
                     self.fpu.set(0, result);
                 }
             }

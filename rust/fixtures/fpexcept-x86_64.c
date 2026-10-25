@@ -5,7 +5,7 @@ static unsigned char state[512] __attribute__((aligned(16)));
 static unsigned char memory[16],record[64];
 #define EXEC(instruction) __asm__ volatile("fninit; fldz; fldz; fldz; fldz; fldz; fldz; fldz; fldz; fninit; fldcw %3; fldt %1; fldt %2; " instruction "; fxsave64 %0; fninit":"=m"(state):"m"(y),"m"(x),"m"(control),"m"(memory):"st","st(1)","memory")
 __attribute__((noreturn,force_align_arg_pointer)) void _start(void){
- for(unsigned op=0;op<17;op++)for(unsigned mode=0;mode<12;mode++)for(unsigned unmasked=0;unmasked<8;unmasked++)for(unsigned sample=0;sample<(op>=9&&op<=14?32:1);sample++){
+ for(unsigned op=0;op<21;op++)for(unsigned mode=0;mode<12;mode++)for(unsigned unmasked=0;unmasked<8;unmasked++)for(unsigned sample=0;sample<((op>=9&&op<=14)||op>=17?32:1);sample++){
   unsigned short control=0x7f|((mode<4?0:mode<8?2:3)<<8)|((mode&3)<<10);
   static const unsigned short masks[]={0,32,8,16,24,56,2,63};
   control&=~masks[unmasked];
@@ -22,7 +22,23 @@ __attribute__((noreturn,force_align_arg_pointer)) void _start(void){
   if(op==13){x=(struct extended){0x8000000000000000ul,1};y=(struct extended){0x8000000000000000ul,0x3ffe};}
   if(op==14){x=(struct extended){0xfffffffffffffffful,0x7ffe};y=(struct extended){0x8000000000000000ul,0x4000};}
   if(op==15||op==16){x=(struct extended){1,0};y=(struct extended){0x8000000000000000ul,0x3fff};}
-  if(sample){
+  if(op>=17){
+   x=(struct extended){0x8000000000000000ul,0x3fff};
+   if(op==18)x=(struct extended){0xfffffffffffffffful,0x7ffe};
+   if(op==19)x=(struct extended){1,0};
+   if(op==20)x=(struct extended){0x8000000000000000ul,1};
+   static const struct extended powers[]={
+    {0x8000000000000000ul,0x3fff},{0x8000000000000000ul,0xbfff},
+    {0x8000000000000000ul,0x400d},{0x8000000000000000ul,0xc00d},
+    {0xc000000000000000ul,0x400d},{0xc000000000000000ul,0xc00d},
+    {0x8000000000000000ul,0x400e},{0x8000000000000000ul,0xc00e},
+    {0x9c40000000000000ul,0x400e},{0x9c40000000000000ul,0xc00e},
+    {0x8000000000000000ul,0x400f},{0x8000000000000000ul,0xc00f},
+    {0x8000000000000000ul,0x4fff},{0x8000000000000000ul,0xcfff},
+    {0xfffffffffffffffful,0x3fff},{0xfffffffffffffffful,0xbfff}};
+   y=powers[sample%16];if(sample>=16)x.high^=0x8000;
+  }
+  if(sample && op<17){
    unsigned long seed=sample*0x9e3779b97f4a7c15ul;
    seed^=seed>>12;seed^=seed<<25;seed^=seed>>27;
    x.low=seed|0x8000000000000000ul;y.low=(seed*0x2545f4914f6cdd1dul)|0x8000000000000000ul;
@@ -51,6 +67,7 @@ __attribute__((noreturn,force_align_arg_pointer)) void _start(void){
    case 13:case 14:EXEC("fmulp %%st,%%st(1)");break;
    case 15:EXEC("fadd %%st(1),%%st");break;
    case 16:EXEC("fmul %%st(1),%%st");break;
+   case 17:case 18:case 19:case 20:EXEC("fscale");break;
   }
   for(int n=0;n<64;n++)record[n]=0;
   for(int n=0;n<10;n++){record[n]=state[32+n];record[10+n]=state[48+n];}

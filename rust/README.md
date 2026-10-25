@@ -595,12 +595,14 @@ All other exception comparisons remain strict. C1 and last-bit differences remai
 expected for approximate instructions, and full FPU support is still incomplete.
 
 Unmasked precision exceptions now commit the rounded result, memory store and
-stack pop before setting the deferred exception state. A separate 19,488-record
+stack pop before setting the deferred exception state. A separate 31,776-record
 native oracle covers add/multiply/divide, square root, rounding, float/integer/BCD
 stores and popping arithmetic across precision and rounding controls, with precision, overflow, underflow and denormal exceptions
 masked and unmasked. CI replays those exact bytes on Apple Silicon. Basic arithmetic now commits the exponent-adjusted register result on unmasked
 overflow/underflow, including popping operations, and gives unmasked denormal
 operands priority over subsequent result exceptions. Qualification includes
 random significands, signs and near-boundary values across precision controls.
-Wrapped results for FSCALE/transcendentals and guest synchronous SIGFPE delivery
+FSCALE also applies trap exponent adjustment, including extreme exponents whose
+adjusted result still saturates to infinity/zero. Wrapped results for
+transcendentals and guest synchronous SIGFPE delivery
 remain outstanding; this does not complete the x87 exception model.
