@@ -76,7 +76,11 @@ Implemented slices:
   and chown set-ID clearing. Host ownership stays unchanged. Attribute payloads
   match C on Darwin; Linux uses the required `user.` namespace.
 - Unconnected guest Unix-domain sockets can resolve pathname connect attempts
-  and report missing/non-socket targets. No host socket is opened.
+  and report missing/non-socket targets. Connected AF_UNIX stream socket pairs
+  support read/write, readv/writev, send/recv, sendfile, half-close, poll, peek,
+  nonblocking flags shared across duplicates, and close-on-exec. Their bounded
+  queues and endpoint lifetimes are guest-owned; no host socket is opened.
+  Pathname bind/listen/accept, ancillary data, and Internet sockets remain.
 - Bounded capture, timeout/cancellation (including blocked pipes/futexes), and
   explicit exit/signal/timeout/cancel/budget outcomes separate from engine errors.
 
@@ -122,7 +126,11 @@ an open directory is not fully supported. Virtual proc files expose a small
 explicit subset and snapshot exec inputs; they are not complete Linux procfs.
 File close uses Rust's Drop and does not yet surface late host close errors.
 Non-UTF8 exec/path strings and overlapping ELF segment pages are not implemented.
-No macOS execution or broader host compatibility has been validated yet.
+GitHub Actions at `30dad286b0412700838adf8a7d39fd200e08fe12` passed the Rust
+workspace tests, formatting, and Clippy on Darwin arm64 (macos-14). Full builder
+workloads have not yet been validated on macOS. Linux CI exposed native fixture
+assumptions about directory order and signal timing; those tests now enumerate
+names independent of order and acknowledge signal progress through a pipe.
 
 ## Decoder evaluation
 
@@ -157,7 +165,7 @@ The preexisting C executable, config, clean-build log and hash manifest are in
 `/workspace/work/blink-baseline`. The clean reference build uses the separate
 `o/rust-reference` directory. On this Linux x86_64 host, Rust, C interpreter and
 native Linux agree on the original fixtures, filesystem/sendfile, and signal
-restart. All 12 fixtures pass Rust/native. C differs on vfork memory sharing and
+restart. All 13 fixtures pass Rust/native. C differs on vfork memory sharing and
 returns extra F_GETFL flags on a CLOEXEC pipe in the descriptor fixture. C JIT fails the pipe/fork
 fixture and crashes during the exec fixture, including after a clean rebuild.
 Those failures remain visible; C is a comparison target, not an infallible oracle.

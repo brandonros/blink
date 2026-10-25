@@ -1,4 +1,5 @@
 //! Cooperative guest processes. No host fork, host signals, or blocking guest pipes.
+mod socket;
 mod virtual_fs;
 use crate::{elf, Command, RunOutcome, RuntimeConfig, Termination};
 use blink_core::{Access, Cpu, Error, GuestArch, Memory, Permissions, Result, Step};
@@ -363,6 +364,13 @@ pub(super) fn run(
                         158 => 115,
                         159 => 116,
                         198 => 41,
+                        65 => 19,
+                        204 => 51,
+                        205 => 52,
+                        199 => 53,
+                        206 => 44,
+                        207 => 45,
+                        210 => 48,
                         203 => 42,
                         71 => 40,
                         29 => 16,
@@ -701,6 +709,85 @@ pub(super) fn run(
                             }
                         }
                     }
+                    19 => {
+                        let fd = process.fds.borrow().get(&(args[0] as i32)).cloned();
+                        match fd.as_ref() {
+                            Some(Fd::Socket(endpoint)) => {
+                                match socket::vectored(
+                                    &mut process.memory.borrow_mut(),
+                                    endpoint,
+                                    args[1],
+                                    args[2],
+                                    false,
+                                )? {
+                                    Some(result) => result,
+                                    None => {
+                                        process.pending = Some((number, args));
+                                        event = Event::Blocked;
+                                        break;
+                                    }
+                                }
+                            }
+                            None => errno(9),
+                            _ => return Err(Error::UnsupportedSyscall(number)),
+                        }
+                    }
+                    51 | 52 => match process.fds.borrow().get(&(args[0] as i32)) {
+                        Some(Fd::Socket(_)) => socket::name(&process, args)?,
+                        Some(Fd::UnixSocket { .. }) if nr == 51 => socket::name(&process, args)?,
+                        Some(Fd::UnixSocket { .. }) => errno(107),
+                        None => errno(9),
+                        _ => errno(88),
+                    },
+                    53 => socket::pair(&process, args, &mut next_pipe)?,
+                    48 => match process.fds.borrow().get(&(args[0] as i32)) {
+                        None => errno(9),
+                        Some(Fd::Socket(endpoint)) => {
+                            if args[1] > 2 {
+                                errno(22)
+                            } else {
+                                endpoint.shutdown(args[1]);
+                                0
+                            }
+                        }
+                        Some(Fd::UnixSocket { .. }) => errno(107),
+                        _ => errno(88),
+                    },
+                    44 | 45 => {
+                        if args[4] != 0 || args[5] != 0 {
+                            return Err(Error::UnsupportedSyscall(number));
+                        }
+                        let fd = process.fds.borrow().get(&(args[0] as i32)).cloned();
+                        match fd.as_ref() {
+                            Some(Fd::Socket(endpoint)) => {
+                                let result = socket::transfer(
+                                    &mut process.memory.borrow_mut(),
+                                    endpoint,
+                                    args[1],
+                                    args[2],
+                                    nr == 44,
+                                    args[3],
+                                )?;
+                                match result {
+                                    None => {
+                                        process.pending = Some((number, args));
+                                        event = Event::Blocked;
+                                        break;
+                                    }
+                                    Some(result) => {
+                                        if result == errno(32) && args[3] & 0x4000 == 0 {
+                                            process.pending_signals |= 1 << 12;
+                                            process.signal_senders[12] = process.group;
+                                        }
+                                        result
+                                    }
+                                }
+                            }
+                            None => errno(9),
+                            Some(Fd::UnixSocket { .. }) => errno(107),
+                            _ => errno(88),
+                        }
+                    }
                     41 => {
                         if args[0] != 1 || args[1] & !(0x80000 | 0x800) != 1 || args[2] != 0 {
                             return Err(Error::UnsupportedSyscall(number));
@@ -849,6 +936,41 @@ pub(super) fn run(
                     16 => {
                         if process.fds.borrow().contains_key(&(args[0] as i32)) {
                             match args[1] {
+                                0x541b => {
+                                    let available =
+                                        match process.fds.borrow().get(&(args[0] as i32)) {
+                                            Some(Fd::Socket(s)) => s.receive.borrow().bytes.len(),
+                                            Some(Fd::Reader(p) | Fd::Writer(p)) => {
+                                                p.borrow().bytes.len()
+                                            }
+                                            _ => return Err(Error::UnsupportedSyscall(number)),
+                                        };
+                                    if process
+                                        .memory
+                                        .borrow_mut()
+                                        .store(args[2], available as u64, 4)
+                                        .is_err()
+                                    {
+                                        errno(14)
+                                    } else {
+                                        0
+                                    }
+                                }
+                                0x5421 => {
+                                    let flag = process.memory.borrow().load(args[2], 4);
+                                    match flag {
+                                        Err(_) => errno(14),
+                                        Ok(flag) => {
+                                            match process.fds.borrow().get(&(args[0] as i32)) {
+                                                Some(Fd::Socket(s)) => {
+                                                    s.nonblock.set(flag != 0);
+                                                    0
+                                                }
+                                                _ => return Err(Error::UnsupportedSyscall(number)),
+                                            }
+                                        }
+                                    }
+                                }
                                 // The embedded runtime exposes byte streams, not terminals.
                                 0x5401 | 0x5402 | 0x5403 | 0x5404 | 0x5413 | 0x5414 => errno(25),
                                 _ => return Err(Error::UnsupportedSyscall(number)),
@@ -925,6 +1047,7 @@ pub(super) fn run(
                                         }
                                     }
                                     Fd::Directory(_) => 0x18000,
+                                    Fd::Socket(s) => 2 | if s.nonblock.get() { 0x800 } else { 0 },
                                     Fd::UnixSocket { nonblock, .. } => {
                                         2 | if *nonblock { 0x800 } else { 0 }
                                     }
@@ -944,6 +1067,13 @@ pub(super) fn run(
                                             0
                                         }) | (if *append { 1024 } else { 0 })
                                     }
+                                },
+                                4 => match &fd {
+                                    Fd::Socket(s) => {
+                                        s.nonblock.set(args[2] & 0x800 != 0);
+                                        0
+                                    }
+                                    _ => return Err(Error::UnsupportedSyscall(number)),
                                 },
                                 _ => return Err(Error::UnsupportedSyscall(number)),
                             },
@@ -988,6 +1118,29 @@ pub(super) fn run(
                                                 total += length;
                                             }
                                             total
+                                        }
+                                    }
+                                }
+                                Some(Fd::Socket(endpoint)) => {
+                                    let result = socket::vectored(
+                                        &mut process.memory.borrow_mut(),
+                                        endpoint,
+                                        args[1],
+                                        args[2],
+                                        true,
+                                    )?;
+                                    match result {
+                                        None => {
+                                            process.pending = Some((number, args));
+                                            event = Event::Blocked;
+                                            break;
+                                        }
+                                        Some(result) => {
+                                            if result == errno(32) {
+                                                process.pending_signals |= 1 << 12;
+                                                process.signal_senders[12] = process.group;
+                                            }
+                                            result
                                         }
                                     }
                                 }
@@ -2110,7 +2263,7 @@ pub(super) fn run(
                                 .is_err()
                             {
                                 errno(14)
-                            } else if count == 0 {
+                            } else if count == 0 && !matches!(&fd, Fd::Socket(_)) {
                                 0
                             } else {
                                 match (nr, &fd) {
@@ -2146,6 +2299,30 @@ pub(super) fn run(
                                         }
                                     }
                                     (0, Fd::Directory(_)) => errno(21),
+                                    (_, Fd::Socket(endpoint)) => {
+                                        let result = socket::transfer(
+                                            &mut process.memory.borrow_mut(),
+                                            endpoint,
+                                            args[1],
+                                            args[2],
+                                            nr == 1,
+                                            0,
+                                        )?;
+                                        match result {
+                                            None => {
+                                                process.pending = Some((number, args));
+                                                event = Event::Blocked;
+                                                break;
+                                            }
+                                            Some(result) => {
+                                                if result == errno(32) {
+                                                    process.pending_signals |= 1 << 12;
+                                                    process.signal_senders[12] = process.group;
+                                                }
+                                                result
+                                            }
+                                        }
+                                    }
                                     (_, Fd::UnixSocket { .. }) => errno(107),
                                     (
                                         0,
@@ -2487,7 +2664,7 @@ fn deliver_signal(process: &mut Process) -> Result<Option<i32>> {
             Engine::X86(cpu) => {
                 if let Some(number) = blocked {
                     if action.flags & 0x10000000 != 0
-                        && matches!(number, 0 | 1 | 20 | 40 | 61 | 73 | 202)
+                        && matches!(number, 0 | 1 | 19 | 20 | 40 | 44 | 45 | 61 | 73 | 202)
                     {
                         cpu.rip = cpu.rip.wrapping_sub(2);
                         cpu.regs[0] = number;
@@ -2757,6 +2934,7 @@ fn poll_events(fd: Option<&Fd>, wanted: u16) -> u16 {
             let p = p.borrow();
             (if p.bytes.len() < 65536 { 4 | 256 } else { 0 }) | if p.readers == 0 { 8 } else { 0 }
         }
+        Some(Fd::Socket(s)) => socket::events(s),
         Some(Fd::UnixSocket { .. }) => 4 | 16 | 256,
         Some(Fd::Stdin) => 1 | 64,
         Some(Fd::Stdout | Fd::Stderr) => 4 | 256,
@@ -2946,7 +3124,7 @@ fn send_file(
         Fd::File { append: true, .. } => return Ok(Some(errno(22))),
         Fd::File { file: out, .. } if Rc::ptr_eq(file, out) => return Ok(Some(errno(22))),
         Fd::Virtual(v) if v.borrow().write => (),
-        Fd::Stdout | Fd::Stderr | Fd::Writer(_) => (),
+        Fd::Stdout | Fd::Stderr | Fd::Writer(_) | Fd::Socket(_) => (),
         Fd::UnixSocket { .. } => return Ok(Some(errno(107))),
         Fd::File { .. } => (),
         _ => return Ok(Some(errno(9))),
@@ -2969,6 +3147,21 @@ fn send_file(
         }
     };
     let mut count = args[3].min(65536) as usize;
+    if let Fd::Socket(socket) = output {
+        let pipe = socket.send.borrow();
+        if count > 0 && (pipe.readers == 0 || socket.write_closed.get()) {
+            return Ok(Some(errno(32)));
+        }
+        let capacity = 65536 - pipe.bytes.len();
+        if count > 0 && capacity == 0 {
+            return Ok(if socket.nonblock.get() {
+                Some(errno(11))
+            } else {
+                None
+            });
+        }
+        count = count.min(capacity);
+    }
     if let Fd::Writer(pipe) = output {
         let pipe = pipe.borrow();
         if count > 0 && pipe.readers == 0 {
@@ -2993,6 +3186,10 @@ fn send_file(
         }
         Fd::Stderr => {
             stderr.write_all(&bytes[..read])?;
+            read
+        }
+        Fd::Socket(socket) => {
+            socket.send.borrow_mut().bytes.extend(&bytes[..read]);
             read
         }
         Fd::Writer(pipe) => {

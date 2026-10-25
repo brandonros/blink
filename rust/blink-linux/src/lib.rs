@@ -7,6 +7,50 @@ pub struct Pipe {
     pub readers: usize,
     pub writers: usize,
 }
+/// A connected guest stream endpoint. Duplicates share status flags and shutdown
+/// state; the last descriptor closes each live half, including after fork/exec.
+pub struct Socket {
+    pub inode: u64,
+    pub receive: Rc<RefCell<Pipe>>,
+    pub send: Rc<RefCell<Pipe>>,
+    pub nonblock: std::cell::Cell<bool>,
+    pub read_closed: std::cell::Cell<bool>,
+    pub write_closed: std::cell::Cell<bool>,
+}
+impl Socket {
+    pub fn pair(inode: u64, nonblock: bool) -> [Rc<Self>; 2] {
+        let queues: [_; 2] = std::array::from_fn(|_| {
+            Rc::new(RefCell::new(Pipe {
+                readers: 1,
+                writers: 1,
+                ..Default::default()
+            }))
+        });
+        std::array::from_fn(|n| {
+            Rc::new(Self {
+                inode: inode + n as u64,
+                receive: queues[n].clone(),
+                send: queues[1 - n].clone(),
+                nonblock: nonblock.into(),
+                read_closed: false.into(),
+                write_closed: false.into(),
+            })
+        })
+    }
+    pub fn shutdown(&self, how: u64) {
+        if how != 1 && !self.read_closed.replace(true) {
+            self.receive.borrow_mut().readers -= 1;
+        }
+        if how != 0 && !self.write_closed.replace(true) {
+            self.send.borrow_mut().writers -= 1;
+        }
+    }
+}
+impl Drop for Socket {
+    fn drop(&mut self) {
+        self.shutdown(2);
+    }
+}
 pub enum VirtualContent {
     Bytes(std::io::Cursor<Vec<u8>>),
     Directory {
@@ -25,6 +69,7 @@ pub struct VirtualOpen {
     pub write: bool,
 }
 pub enum Fd {
+    Socket(Rc<Socket>),
     Virtual(Rc<RefCell<VirtualOpen>>),
     Directory(Rc<RefCell<blink_host::Directory>>),
     UnixSocket {
@@ -47,6 +92,7 @@ pub enum Fd {
 impl Clone for Fd {
     fn clone(&self) -> Self {
         match self {
+            Self::Socket(s) => Self::Socket(s.clone()),
             Self::Virtual(v) => Self::Virtual(v.clone()),
             Self::Directory(d) => Self::Directory(d.clone()),
             Self::UnixSocket { inode, nonblock } => Self::UnixSocket {
@@ -148,6 +194,7 @@ impl Fd {
             _ => Ok(FileStat {
                 dev: 0xffff_ff00,
                 ino: match self {
+                    Self::Socket(s) => s.inode,
                     Self::UnixSocket { inode, .. } => *inode,
                     Self::Stdin => 1,
                     Self::Stdout => 2,
@@ -156,7 +203,7 @@ impl Fd {
                     _ => unreachable!(),
                 },
                 nlink: 1,
-                mode: if matches!(self, Self::UnixSocket { .. }) {
+                mode: if matches!(self, Self::UnixSocket { .. } | Self::Socket(_)) {
                     0o140600
                 } else {
                     0o010600

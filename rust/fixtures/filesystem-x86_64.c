@@ -21,12 +21,25 @@ __attribute__((noreturn)) void _start(void) {
     long relative=call(257,directory,(long)"source",0,0);
     CHECK(relative>=0 && call(3,relative,0,0,0)==0);
     char entries[128];
-    CHECK(call(217,directory,(long)entries,24,0)==24 && entries[19]=='.' && entries[20]==0);
-    CHECK(call(217,directory,(long)entries,24,0)==24 && entries[19]=='.' && entries[20]=='.');
-    CHECK(call(217,directory,(long)entries,24,0)==-22);
-    CHECK(call(217,directory,(long)entries,128,0)>24);
-    CHECK(call(8,directory,0,0,0)==0);
-    CHECK(call(217,directory,(long)entries,24,0)==24 && entries[19]=='.' && entries[20]==0);
+    CHECK(call(217,directory,(long)entries,8,0)==-22);
+    for(int pass=0;pass<2;pass++) {
+        unsigned seen=0; long size;
+        while((size=call(217,directory,(long)entries,sizeof entries,0))>0) {
+            for(long pos=0;pos<size;) {
+                CHECK(pos+20<=size);
+                unsigned record=(unsigned char)entries[pos+16] | ((unsigned char)entries[pos+17]<<8);
+                CHECK(record>=24 && pos+record<=size);
+                const char *name=entries+pos+19;
+                if(name[0]=='.' && name[1]==0) seen|=1;
+                if(name[0]=='.' && name[1]=='.' && name[2]==0) seen|=2;
+                if(name[0]=='s' && name[1]=='o' && name[5]=='e' && name[6]==0) seen|=4;
+                if(name[0]=='d' && name[1]=='e' && record>=32 && name[10]=='n' && name[11]==0) seen|=8;
+                pos+=record;
+            }
+        }
+        CHECK(size==0 && seen==15);
+        CHECK(call(8,directory,0,0,0)==0);
+    }
     CHECK(call(3,directory,0,0,0)==0);
     long offset=2;
     CHECK(call(40,out,in,(long)&offset,3)==3 && offset==5);
