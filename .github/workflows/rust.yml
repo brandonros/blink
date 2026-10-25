@@ -51,6 +51,7 @@ jobs:
           python3 rust/builder-smoke.py --root target/amd64-alpine --builder work/builder
           python3 rust/rootless-smoke.py --root target/amd64-alpine
           python3 rust/apk-smoke.py --root target/amd64-alpine
+          python3 rust/worker-smoke.py --root target/amd64-alpine
       - name: Pull pinned AMD64 Node fixture using linux-oci-builder
         run: cargo run --release --locked --manifest-path work/builder/Cargo.toml -- docker.io/library/node@sha256:025b8e975a61d94e33abeafaad1255ef44e4898cf1a1b6446860009c72e6d284 --platform linux/amd64 --output target/node-oci
       - name: Run musl Node JavaScript and filesystem gates
@@ -67,6 +68,7 @@ jobs:
             target/rootless-smoke/results.json
             target/apk-smoke/results.json
             target/node-smoke/results.json
+            target/worker-smoke/results.json
       - uses: actions/upload-artifact@v4
         if: always() && runner.os == 'Linux'
         with:

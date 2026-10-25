@@ -513,3 +513,32 @@ FBLD/FBSTP support valid 18-digit packed decimal, signed zero, rounding modes,
 precision/invalid exceptions and the indefinite result for invalid stores.
 Malformed input digit nibbles remain explicitly unsupported. Native comparisons
 include 2,048 decimal loads and extended-value stores across rounding controls.
+
+## Stage worker protocol
+
+`cargo build --release -p blink-cli` also builds `blink-worker`. It accepts one
+JSON request per line on stdin and emits one JSON reply per line on stdout.
+Guest stdin is EOF; guest stdout/stderr go to distinct, newly created host files.
+This is a trusted host adapter for builders, not a guest-facing RPC service.
+The worker has no downloader, Dockerfile parser or OCI assembly logic.
+
+Create a context with `{"op":"create","context":"stage","rootfs":"/path/to/root","rootless_metadata":true}`.
+Run commands with `{"op":"run","context":"stage","argv":["/bin/sh","-c","echo hello"],"timeout_ms":10000,"stdout":"/path/to/new.stdout","stderr":"/path/to/new.stderr"}`.
+Run requests optionally specify `cwd`, `env` (a string map), `uid` and `gid`.
+Close explicitly with `{"op":"close","context":"stage"}`; EOF closes remaining
+contexts. Errors return `ok:false`; completed executions return `ok:true` plus
+`termination`, `code` and `instructions`. A nonzero exit is an execution outcome,
+not an engine error. Requests are sequential, capped at 1 MiB, with at most 64
+contexts. Use command timeouts; this adapter does not multiplex cancellation
+requests while a command runs. The direct library API retains cancellation tokens.
+
+Create defaults are 512 MiB backing, 4 GiB virtual mappings, 256 MiB ELF size,
+and one billion interpreted instructions per run, configurable through
+`max_memory`, `max_virtual_memory`, `max_image_size`, `max_instructions`.
+Host networking is opt-in with `network:true`. Serde 1.0.229 and serde_json
+1.0.154 (MIT/Apache-2.0) are pinned for this host protocol, independently of the
+architecture decoders' disabled serde features. Cargo.lock pins transitive crates.
+
+`worker-smoke.py` checks persistent filesystem/metadata, isolated contexts,
+nonzero-exit and timeout recovery, per-run credentials, protocol isolation and
+explicit close. It runs on Linux and Apple Silicon CI.
