@@ -1,0 +1,140 @@
+name: Rust runtime
+on:
+  push:
+    paths: ['rust/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/rust.yml']
+  pull_request:
+    paths: ['rust/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/rust.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  runtime:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host platform
+        run: uname -sm
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+      - name: Format
+        run: cargo +stable fmt --all --check
+      - name: Test lifecycle, CPU and host metadata
+        run: cargo +stable test --workspace --locked
+      - name: Clippy
+        run: cargo +stable clippy --workspace --all-targets --locked -- -D warnings
+      - name: Original assembly and native Linux comparisons
+        if: runner.os == 'Linux'
+        run: |
+          python3 rust/asm-regressions.py
+          python3 rust/differential.py --rust-native-only
+          python3 rust/float-regressions.py
+          python3 rust/x87-regressions.py
+          python3 rust/fcmov-regressions.py
+          python3 rust/fpexcept-regressions.py
+          python3 rust/packed-regressions.py
+          python3 rust/approx-regressions.py
+          python3 -m venv target/precision-python
+          target/precision-python/bin/pip install mpmath==1.3.0
+          target/precision-python/bin/python rust/transcend-regressions.py
+          python3 rust/tcp-smoke.py
+      - uses: actions/checkout@v4
+        with:
+          repository: brandonros/linux-oci-builder
+          ref: 02d15f5826de5cbc90895b6c973730eeb297505e
+          path: work/builder
+      - name: Prepare pinned AMD64 Alpine fixture without a container engine
+        run: python3 rust/alpine-fixture.py --root target/amd64-alpine
+      - name: Run dynamic musl, builder commands, rootless metadata and offline APK
+        run: |
+          python3 rust/alpine-smoke.py --root target/amd64-alpine
+          python3 rust/builder-smoke.py --root target/amd64-alpine --builder work/builder
+          python3 rust/rootless-smoke.py --root target/amd64-alpine
+          python3 rust/apk-smoke.py --root target/amd64-alpine
+          python3 rust/worker-smoke.py --root target/amd64-alpine
+      - name: Pull pinned AMD64 Node fixture using linux-oci-builder
+        run: cargo run --release --locked --manifest-path work/builder/Cargo.toml -- docker.io/library/node@sha256:025b8e975a61d94e33abeafaad1255ef44e4898cf1a1b6446860009c72e6d284 --platform linux/amd64 --output target/node-oci
+      - name: Run musl Node JavaScript and filesystem gates
+        run: |
+          python3 rust/node-fixture.py --layout target/node-oci --root target/amd64-node
+          python3 rust/node-smoke.py --root target/amd64-node
+      - name: Pull and run pinned Debian glibc fixture
+        run: |
+          cargo run --release --locked --manifest-path work/builder/Cargo.toml -- docker.io/library/debian@sha256:ec31d744f83f4a73447ba045aaab9409997efe5cc706eca4890c1be36cc1606a --platform linux/amd64 --output target/debian-oci
+          python3 rust/debian-fixture.py --layout target/debian-oci --root target/amd64-debian
+          python3 rust/debian-smoke.py --root target/amd64-debian
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rust-workloads-${{ runner.os }}
+          path: |
+            target/alpine-smoke/results.json
+            target/builder-smoke/results.json
+            target/rootless-smoke/results.json
+            target/apk-smoke/results.json
+            target/node-smoke/results.json
+            target/debian-smoke/results.json
+            target/worker-smoke/results.json
+      - uses: actions/upload-artifact@v4
+        if: always() && runner.os == 'Linux'
+        with:
+          name: rust-linux-comparisons
+          path: |
+            target/original-asm/results.json
+            target/differential/results.json
+            target/differential/atomic-x86_64
+            target/differential/fpenv-x86_64
+            target/differential/fpsignal-x86_64
+            target/differential/glibcabi-x86_64
+            target/tcp-smoke/results.json
+            target/float-regressions/float-x86_64
+            target/float-regressions/native.bin
+            target/float-regressions/results.json
+            target/x87-regressions/x87-x86_64
+            target/x87-regressions/native.bin
+            target/x87-regressions/results.json
+            target/fpexcept-regressions/fpexcept-x86_64
+            target/fpexcept-regressions/native.bin
+            target/fpexcept-regressions/results.json
+            target/fcmov-regressions/fcmov-x86_64
+            target/fcmov-regressions/native.bin
+            target/fcmov-regressions/results.json
+            target/packed-regressions/packed-x86_64
+            target/packed-regressions/native.bin
+            target/packed-regressions/results.json
+            target/approx-regressions/approx-x86_64
+            target/approx-regressions/native.bin
+            target/approx-regressions/results.json
+            target/transcend-regressions/transcend-x86_64
+            target/transcend-regressions/native.bin
+            target/transcend-regressions/results.json
+
+  replay-amd64-on-apple-silicon:
+    needs: runtime
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: rust-linux-comparisons
+          path: target/oracle
+      - name: Replay Linux AMD64 floating-point fixture on Darwin arm64
+        run: |
+          uname -sm
+          for suite in float x87 packed fcmov fpexcept; do
+            cargo run --release --locked -p blink-cli -- target/oracle/$suite-regressions/$suite-x86_64 > target/oracle/$suite-actual.bin
+            cmp target/oracle/$suite-regressions/native.bin target/oracle/$suite-actual.bin
+          done
+          python3 rust/approx-regressions.py --replay target/oracle/approx-regressions
+          cargo run --release --locked -p blink-cli -- target/oracle/differential/atomic-x86_64
+          cargo run --release --locked -p blink-cli -- target/oracle/differential/fpenv-x86_64
+          cargo run --release --locked -p blink-cli -- target/oracle/differential/fpsignal-x86_64
+          cargo run --release --locked -p blink-cli -- target/oracle/differential/glibcabi-x86_64
+          python3 -m venv target/precision-python
+          target/precision-python/bin/pip install mpmath==1.3.0
+          target/precision-python/bin/python rust/transcend-regressions.py --replay target/oracle/transcend-regressions

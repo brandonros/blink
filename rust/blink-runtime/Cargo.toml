@@ -1,0 +1,16 @@
+[package]
+name = "blink-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+blink-core = { path = "../blink-core" }
+blink-host = { path = "../blink-host" }
+blink-linux = { path = "../blink-linux" }
+blink-x86_64 = { path = "../blink-x86_64" }
+blink-aarch64 = { path = "../blink-aarch64" }

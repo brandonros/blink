@@ -1,0 +1,15 @@
+[package]
+name = "blink-cli"
+default-run = "blink-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+blink = { path = "../blink" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
