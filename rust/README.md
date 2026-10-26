@@ -656,3 +656,13 @@ unbacked reservations and file-EOF holes) rather than host page-cache state.
 FICLONE and copy_file_range report explicit unavailability, so GNU cp uses its
 ordinary byte-copy fallback. Native ABI checks and the Debian copy/compare gate
 cover these paths.
+
+## GS base port
+
+AMD64 GS base now follows the C runtime's per-CPU segment state: GS-prefixed
+loads/stores and masked stores use it, and arch_prctl supports ARCH_SET_GS and
+ARCH_GET_GS. Fork copies the base and fresh exec CPU initialization clears it.
+The native Linux gsbase fixture checks initial state, set/get, memory reads and
+writes, invalid output pointers, rejected kernel addresses and fork isolation.
+Unit tests cover negative displacements and masked stores at page boundaries.
+FSGSBASE instructions and segment selector loading remain unsupported.

@@ -2529,16 +2529,20 @@ pub(super) fn run(
                     39 => process.group as u64,
                     186 => pid as u64,
                     158 => match args[0] {
-                        0x1002 => {
+                        0x1001 | 0x1002 => {
                             if args[1] > 0x7fff_ffff_ffff {
                                 errno(1)
                             } else {
-                                process.cpu.tls(args[1]);
+                                match &mut process.cpu {
+                                    Engine::X86(c) if args[0] == 0x1001 => c.gs_base = args[1],
+                                    _ => process.cpu.tls(args[1]),
+                                }
                                 0
                             }
                         }
-                        0x1003 => {
+                        0x1003 | 0x1004 => {
                             let base = match &process.cpu {
+                                Engine::X86(c) if args[0] == 0x1004 => c.gs_base,
                                 Engine::X86(c) => c.fs_base,
                                 _ => unreachable!(),
                             };

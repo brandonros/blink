@@ -14,6 +14,7 @@ pub struct X86 {
     pub rip: u64,
     pub flags: u64,
     pub fs_base: u64,
+    pub gs_base: u64,
     pub xmm: [[u8; 16]; 16],
     pub mxcsr: u32,
     pub(crate) fpu: x87::Fpu,
@@ -36,6 +37,7 @@ impl X86 {
             rip: entry,
             flags: 2,
             fs_base: 0,
+            gs_base: 0,
             xmm: [[0; 16]; 16],
             mxcsr: 0x1f80,
             fpu: x87::Fpu::default(),
@@ -311,7 +313,7 @@ impl Cpu for X86 {
                 };
                 let segment = match ins.prefixes.segment() {
                     yaxpeax_x86::long_mode::Segment::FS => self.fs_base,
-                    yaxpeax_x86::long_mode::Segment::GS => return Err(bad()),
+                    yaxpeax_x86::long_mode::Segment::GS => self.gs_base,
                     _ => 0,
                 };
                 let address = offset.wrapping_add(segment);
@@ -1403,6 +1405,22 @@ mod vector_tests {
         c.step(&mut m).unwrap();
         assert_eq!(c.regs[0], 42);
     }
+    #[test]
+    fn gs_negative_displacement_is_sign_extended() {
+        let mut m = Memory::new(8192);
+        m.map(0x1000, 4096, Permissions::RX).unwrap();
+        m.map(0x2000, 4096, Permissions::RW).unwrap();
+        m.initialize(
+            0x1000,
+            &[0x65, 0x48, 0x8b, 0x04, 0x25, 0xd8, 0xff, 0xff, 0xff],
+        )
+        .unwrap();
+        m.store(0x2000, 42, 8).unwrap();
+        let mut c = X86::new(0x1000, 0);
+        c.gs_base = 0x2028;
+        c.step(&mut m).unwrap();
+        assert_eq!(c.regs[0], 42);
+    }
 }
 
 #[cfg(test)]
@@ -1484,6 +1502,29 @@ mod sse_memory_tests {
         let (mut cpu, mut memory) = run(&code, 0);
         cpu.regs[7] = 8192;
         cpu.fs_base = 4095;
+        cpu.xmm[1][0] = 128;
+        cpu.step(&mut memory).unwrap();
+        assert_eq!(memory.load(12287, 1).unwrap(), 0x5a);
+        memory.store(12287, 0, 1).unwrap();
+        cpu.rip = 4096;
+        cpu.xmm[1][1] = 128;
+        assert!(matches!(
+            cpu.step(&mut memory),
+            Err(Error::MemoryFault { address: 12288, .. })
+        ));
+        assert_eq!(memory.load(12287, 1).unwrap(), 0);
+        let (mut cpu, mut memory) = run(&[0x67, 0x66, 0x0f, 0xf7, 0xc1], 0);
+        cpu.regs[7] = 0xffff000000002000;
+        cpu.xmm[1][0] = 128;
+        cpu.step(&mut memory).unwrap();
+        assert_eq!(memory.load(8192, 1).unwrap(), 0x5a);
+    }
+    #[test]
+    fn gs_masked_store_checks_selected_bytes_and_segment_address() {
+        let code = [0x65, 0x66, 0x0f, 0xf7, 0xc1];
+        let (mut cpu, mut memory) = run(&code, 0);
+        cpu.regs[7] = 8192;
+        cpu.gs_base = 4095;
         cpu.xmm[1][0] = 128;
         cpu.step(&mut memory).unwrap();
         assert_eq!(memory.load(12287, 1).unwrap(), 0x5a);

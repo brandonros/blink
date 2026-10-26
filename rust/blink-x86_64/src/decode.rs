@@ -215,7 +215,7 @@ pub(super) fn operand(
     } else {
         match i.segment_override_for_op(index) {
             Some(Segment::FS) => cpu.fs_base,
-            Some(Segment::GS) => return Err(bad()),
+            Some(Segment::GS) => cpu.gs_base,
             _ => 0,
         }
     };
