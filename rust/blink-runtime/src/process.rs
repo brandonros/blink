@@ -2555,6 +2555,15 @@ pub(super) fn run(
                         _ => return Err(Error::UnsupportedSyscall(number)),
                     },
                     157 => match args[0] {
+                        // PR_CAPBSET_READ: the virtual bounding namespace matches
+                        // capget; no host capability state is exposed.
+                        23 => {
+                            if args[1] as u32 <= 40 {
+                                1
+                            } else {
+                                errno(22)
+                            }
+                        }
                         15 => {
                             let mut name = [0u8; 16];
                             let mut valid = true;

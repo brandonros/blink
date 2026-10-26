@@ -4,6 +4,11 @@ static long call(long n,long a,long b,long c,long d,long e,long f) {register lon
 #define CHECK(x) do {if(!(x)){C(231,__LINE__,0,0,0);__builtin_unreachable();}} while(0)
 static void check_name(const char *expected) {char value[16];CHECK(C(157,16,value,0,0)==0);for(int i=0;i<16;i++){CHECK(value[i]==expected[i]);if(!value[i])return;}}
 __attribute__((noreturn)) void _start(void) {
+    /* Host bounding sets differ; validate the query ABI, not host grants. */
+    long bound=C(157,23,0,0,0); CHECK(bound==0 || bound==1);
+    bound=C(157,23,32,0,0); CHECK(bound==0 || bound==1);
+    CHECK(C(157,23,41,0,0)==-22);
+    CHECK(C(157,23,-1,0,0)==-22);
     CHECK(C(157,15,"0123456789abcdefghijkl",0,0)==0);check_name("0123456789abcde");
     long page=call(9,0,8192,3,0x22,-1,0);CHECK(page>0 && C(10,page+4096,4096,0,0)==0);
     char *end=(char*)(page+4096);end[-1]=0;

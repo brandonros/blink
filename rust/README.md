@@ -666,3 +666,20 @@ The native Linux gsbase fixture checks initial state, set/get, memory reads and
 writes, invalid output pointers, rejected kernel addresses and fork isolation.
 Unit tests cover negative displacements and masked stores at page boundaries.
 FSGSBASE instructions and segment selector loading remain unsupported.
+
+PR_CAPBSET_READ now exposes the virtual capability bounding namespace (0–40),
+independent of host capabilities and guest UID, with EINVAL outside that range.
+Capability dropping and mutation remain unsupported. The native prctl fixture
+checks query results and invalid capability numbers. This lets actual trixie
+APT proceed past startup to its next unimplemented operation, F_SETLK; POSIX
+record locks require guest process ownership and lifecycle semantics.
+
+Port session evidence: the actual agent-platform source at
+084da8c60f916838d866c2607a0096c87a24be89 with trixie manifest
+4876fdea29cac1a33a3195f1eb1952feb1fca7dd6dd00be3e2f1879cf20d34d2
+passed initial metadata and snapshot checkpoints under Rust. A 60-second first
+attempt timed out during metadata; a fresh run with 900 seconds passed those
+steps and failed explicitly on the capability query during apt-get update.
+After the query implementation, a traced APT reproduction reaches
+fcntl(fd, F_SETLK, flock). No application image or package install success is
+claimed. Local receipts remain under linux-oci-builder/target/rust-agent/.

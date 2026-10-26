@@ -10,6 +10,9 @@ __attribute__((noreturn)) void _start(void) {
     unsigned long value;
     __asm__ volatile("movq %%gs:0,%0":"=r"(value)); CHECK(value==data[0]);
     __asm__ volatile("movq %0,%%gs:8"::"r"(value):"memory"); CHECK(data[1]==value);
+    unsigned long copied=0, source=0, destination=(unsigned long)&copied, count=8;
+    __asm__ volatile("gs rep movsb":"+S"(source),"+D"(destination),"+c"(count)::"memory");
+    CHECK(copied==data[0] && source==8 && count==0);
     CHECK(C(158,0x1004,1,0,0)==-14); CHECK(get()==(unsigned long)data);
     CHECK(C(158,0x1001,0xffffffffffffffffUL,0,0)==-1); CHECK(get()==(unsigned long)data);
     long child=C(57,0,0,0,0); CHECK(child>=0);
